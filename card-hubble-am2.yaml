@@ -1,0 +1,463 @@
+type: vertical-stack
+cards:
+  - type: heading
+    heading: Hubble AM2 Combined Battery
+    heading_style: title
+
+  # ============================================================
+  # COMBINED BATTERY OVERVIEW
+  # ============================================================
+  - type: grid
+    columns: 2
+    square: false
+    cards:
+      - type: tile
+        entity: sensor.hubble_am2_combined_combined_state_of_charge
+        name: Combined SOC
+      - type: tile
+        entity: sensor.hubble_am2_combined_combined_state_of_health
+        name: Combined SOH
+      - type: tile
+        entity: sensor.hubble_am2_combined_combined_average_pack_voltage
+        name: Pack Voltage
+      - type: tile
+        entity: sensor.hubble_am2_combined_combined_total_current
+        name: Total Current
+      - type: tile
+        entity: sensor.hubble_am2_combined_combined_total_power
+        name: Total Power
+      - type: tile
+        entity: sensor.hubble_am2_combined_combined_total_remaining_capacity
+        name: Remaining Capacity
+      - type: tile
+        entity: sensor.hubble_am2_combined_combined_total_full_capacity
+        name: Full Capacity
+      - type: tile
+        entity: sensor.hubble_am2_combined_combined_total_design_capacity
+        name: Design Capacity
+      - type: tile
+        entity: sensor.hubble_am2_combined_combined_total_detected_cell_count
+        name: Total Detected Cells
+      - type: tile
+        entity: sensor.hubble_am2_combined_combined_worst_delta_cell_voltage
+        name: Worst Cell Delta
+      - type: tile
+        entity: sensor.hubble_am2_combined_combined_projected_runtime
+        name: Projected Runtime
+      - type: tile
+        entity: sensor.hubble_am2_combined_combined_projected_charging_time
+        name: Charging Time to Full
+
+  # ============================================================
+  # PROJECTED RUNTIME / CHARGING TIME
+  # ============================================================
+  - type: entities
+    title: Projected Runtime / Charging Time
+    show_header_toggle: false
+    entities:
+      - entity: sensor.hubble_am2_combined_combined_projected_runtime
+        name: Combined Runtime Remaining
+      - entity: sensor.hubble_am2_combined_combined_projected_charging_time
+        name: Combined Charging Time to Full
+      - entity: sensor.hubble_am2_combined_master_projected_runtime
+        name: Master Runtime Remaining
+      - entity: sensor.hubble_am2_combined_master_projected_charging_time
+        name: Master Charging Time to Full
+      - entity: sensor.hubble_am2_combined_slave_projected_runtime
+        name: Slave Runtime Remaining
+      - entity: sensor.hubble_am2_combined_slave_projected_charging_time
+        name: Slave Charging Time to Full
+
+  # ============================================================
+  # COMBINED CELL HEALTH
+  # ============================================================
+  - type: entities
+    title: Combined Cell Health
+    show_header_toggle: false
+    entities:
+      - entity: sensor.hubble_am2_combined_combined_average_cell_voltage
+        name: Average Cell Voltage
+      - entity: sensor.hubble_am2_combined_combined_lowest_cell_voltage
+        name: Lowest Cell Voltage
+      - entity: sensor.hubble_am2_combined_combined_highest_cell_voltage
+        name: Highest Cell Voltage
+      - entity: sensor.hubble_am2_combined_combined_worst_delta_cell_voltage
+        name: Worst Delta Cell Voltage
+      - entity: sensor.hubble_am2_combined_combined_total_detected_cell_count
+        name: Total Detected Cells
+
+  # ============================================================
+  # MASTER / SLAVE PACK SUMMARY
+  # ============================================================
+  - type: grid
+    columns: 2
+    square: false
+    cards:
+      - type: entities
+        title: Master Pack Summary
+        show_header_toggle: false
+        entities:
+          - entity: sensor.hubble_am2_combined_master_state_of_charge
+            name: SOC
+          - entity: sensor.hubble_am2_combined_master_state_of_health
+            name: SOH
+          - entity: sensor.hubble_am2_combined_master_total_voltage
+            name: Voltage
+          - entity: sensor.hubble_am2_combined_master_current
+            name: Current
+          - entity: sensor.hubble_am2_combined_master_power
+            name: Power
+          - entity: sensor.hubble_am2_combined_master_remaining_capacity
+            name: Remaining Capacity
+          - entity: sensor.hubble_am2_combined_master_full_capacity
+            name: Full Capacity
+          - entity: sensor.hubble_am2_combined_master_design_capacity
+            name: Design Capacity
+          - entity: sensor.hubble_am2_combined_master_charging_cycles
+            name: Charging Cycles
+          - entity: sensor.hubble_am2_combined_master_detected_cell_count
+            name: Detected Cells
+          - entity: sensor.hubble_am2_combined_master_delta_cell_voltage
+            name: Delta Cell Voltage
+          - entity: sensor.hubble_am2_combined_master_projected_runtime
+            name: Projected Runtime
+          - entity: sensor.hubble_am2_combined_master_projected_charging_time
+            name: Charging Time to Full
+
+      - type: entities
+        title: Slave Pack Summary
+        show_header_toggle: false
+        entities:
+          - entity: sensor.hubble_am2_combined_slave_state_of_charge
+            name: SOC
+          - entity: sensor.hubble_am2_combined_slave_state_of_health
+            name: SOH
+          - entity: sensor.hubble_am2_combined_slave_total_voltage
+            name: Voltage
+          - entity: sensor.hubble_am2_combined_slave_current
+            name: Current
+          - entity: sensor.hubble_am2_combined_slave_power
+            name: Power
+          - entity: sensor.hubble_am2_combined_slave_remaining_capacity
+            name: Remaining Capacity
+          - entity: sensor.hubble_am2_combined_slave_full_capacity
+            name: Full Capacity
+          - entity: sensor.hubble_am2_combined_slave_design_capacity
+            name: Design Capacity
+          - entity: sensor.hubble_am2_combined_slave_charging_cycles
+            name: Charging Cycles
+          - entity: sensor.hubble_am2_combined_slave_detected_cell_count
+            name: Detected Cells
+          - entity: sensor.hubble_am2_combined_slave_delta_cell_voltage
+            name: Delta Cell Voltage
+          - entity: sensor.hubble_am2_combined_slave_projected_runtime
+            name: Projected Runtime
+          - entity: sensor.hubble_am2_combined_slave_projected_charging_time
+            name: Charging Time to Full
+
+  # ============================================================
+  # MASTER / SLAVE CELL HEALTH
+  # ============================================================
+  - type: grid
+    columns: 2
+    square: false
+    cards:
+      - type: entities
+        title: Master Cell Health
+        show_header_toggle: false
+        entities:
+          - entity: sensor.hubble_am2_combined_master_average_cell_voltage
+            name: Average Cell Voltage
+          - entity: sensor.hubble_am2_combined_master_min_cell_voltage
+            name: Minimum Cell Voltage
+          - entity: sensor.hubble_am2_combined_master_min_voltage_cell
+            name: Minimum Voltage Cell
+          - entity: sensor.hubble_am2_combined_master_max_cell_voltage
+            name: Maximum Cell Voltage
+          - entity: sensor.hubble_am2_combined_master_max_voltage_cell
+            name: Maximum Voltage Cell
+          - entity: sensor.hubble_am2_combined_master_balancer_status
+            name: Balancer Bitmask
+
+      - type: entities
+        title: Slave Cell Health
+        show_header_toggle: false
+        entities:
+          - entity: sensor.hubble_am2_combined_slave_average_cell_voltage
+            name: Average Cell Voltage
+          - entity: sensor.hubble_am2_combined_slave_min_cell_voltage
+            name: Minimum Cell Voltage
+          - entity: sensor.hubble_am2_combined_slave_min_voltage_cell
+            name: Minimum Voltage Cell
+          - entity: sensor.hubble_am2_combined_slave_max_cell_voltage
+            name: Maximum Cell Voltage
+          - entity: sensor.hubble_am2_combined_slave_max_voltage_cell
+            name: Maximum Voltage Cell
+          - entity: sensor.hubble_am2_combined_slave_balancer_status
+            name: Balancer Bitmask
+
+  # ============================================================
+  # MASTER / SLAVE TEMPERATURES
+  # ============================================================
+  - type: grid
+    columns: 2
+    square: false
+    cards:
+      - type: entities
+        title: Master Temperatures
+        show_header_toggle: false
+        entities:
+          - entity: sensor.hubble_am2_combined_master_battery_temperature_1
+            name: Battery Temp 1
+          - entity: sensor.hubble_am2_combined_master_battery_temperature_2
+            name: Battery Temp 2
+          - entity: sensor.hubble_am2_combined_master_battery_temperature_3
+            name: Battery Temp 3
+          - entity: sensor.hubble_am2_combined_master_battery_temperature_4
+            name: Battery Temp 4
+          - entity: sensor.hubble_am2_combined_master_mosfet_temperature
+            name: MOSFET Temp
+          - entity: sensor.hubble_am2_combined_master_environment_temperature
+            name: Environment Temp
+
+      - type: entities
+        title: Slave Temperatures
+        show_header_toggle: false
+        entities:
+          - entity: sensor.hubble_am2_combined_slave_battery_temperature_1
+            name: Battery Temp 1
+          - entity: sensor.hubble_am2_combined_slave_battery_temperature_2
+            name: Battery Temp 2
+          - entity: sensor.hubble_am2_combined_slave_battery_temperature_3
+            name: Battery Temp 3
+          - entity: sensor.hubble_am2_combined_slave_battery_temperature_4
+            name: Battery Temp 4
+          - entity: sensor.hubble_am2_combined_slave_mosfet_temperature
+            name: MOSFET Temp
+          - entity: sensor.hubble_am2_combined_slave_environment_temperature
+            name: Environment Temp
+
+  # ============================================================
+  # MASTER / SLAVE BMS STATUS
+  # ============================================================
+  - type: grid
+    columns: 2
+    square: false
+    cards:
+      - type: entities
+        title: Master BMS Status
+        show_header_toggle: false
+        entities:
+          - entity: binary_sensor.hubble_am2_combined_master_charging_operation
+            name: Charging Operation
+          - entity: binary_sensor.hubble_am2_combined_master_discharging_operation
+            name: Discharging Operation
+          - entity: binary_sensor.hubble_am2_combined_master_charging
+            name: Charging Enabled
+          - entity: binary_sensor.hubble_am2_combined_master_discharging
+            name: Discharging Enabled
+          - entity: sensor.hubble_am2_combined_master_status
+            name: Status
+          - entity: sensor.hubble_am2_combined_master_warnings
+            name: Warnings
+          - entity: sensor.hubble_am2_combined_master_protections
+            name: Protections
+          - entity: sensor.hubble_am2_combined_master_faults
+            name: Faults
+          - entity: sensor.hubble_am2_combined_master_warnings_bitmask
+            name: Warnings Bitmask
+          - entity: sensor.hubble_am2_combined_master_protections_bitmask
+            name: Protections Bitmask
+          - entity: sensor.hubble_am2_combined_master_fault_status_bitmask
+            name: Fault Status Bitmask
+
+      - type: entities
+        title: Slave BMS Status
+        show_header_toggle: false
+        entities:
+          - entity: binary_sensor.hubble_am2_combined_slave_charging_operation
+            name: Charging Operation
+          - entity: binary_sensor.hubble_am2_combined_slave_discharging_operation
+            name: Discharging Operation
+          - entity: binary_sensor.hubble_am2_combined_slave_charging
+            name: Charging Enabled
+          - entity: binary_sensor.hubble_am2_combined_slave_discharging
+            name: Discharging Enabled
+          - entity: sensor.hubble_am2_combined_slave_status
+            name: Status
+          - entity: sensor.hubble_am2_combined_slave_warnings
+            name: Warnings
+          - entity: sensor.hubble_am2_combined_slave_protections
+            name: Protections
+          - entity: sensor.hubble_am2_combined_slave_faults
+            name: Faults
+          - entity: sensor.hubble_am2_combined_slave_warnings_bitmask
+            name: Warnings Bitmask
+          - entity: sensor.hubble_am2_combined_slave_protections_bitmask
+            name: Protections Bitmask
+          - entity: sensor.hubble_am2_combined_slave_fault_status_bitmask
+            name: Fault Status Bitmask
+
+  # ============================================================
+  # MASTER / SLAVE CELL VOLTAGES
+  # Hubble AM2 is 13S, so only cells 1-13 are shown.
+  # ============================================================
+  - type: grid
+    columns: 2
+    square: false
+    cards:
+      - type: entities
+        title: Master Cell Voltages
+        show_header_toggle: false
+        entities:
+          - entity: sensor.hubble_am2_combined_master_cell_voltage_1
+            name: Cell 1
+          - entity: sensor.hubble_am2_combined_master_cell_voltage_2
+            name: Cell 2
+          - entity: sensor.hubble_am2_combined_master_cell_voltage_3
+            name: Cell 3
+          - entity: sensor.hubble_am2_combined_master_cell_voltage_4
+            name: Cell 4
+          - entity: sensor.hubble_am2_combined_master_cell_voltage_5
+            name: Cell 5
+          - entity: sensor.hubble_am2_combined_master_cell_voltage_6
+            name: Cell 6
+          - entity: sensor.hubble_am2_combined_master_cell_voltage_7
+            name: Cell 7
+          - entity: sensor.hubble_am2_combined_master_cell_voltage_8
+            name: Cell 8
+          - entity: sensor.hubble_am2_combined_master_cell_voltage_9
+            name: Cell 9
+          - entity: sensor.hubble_am2_combined_master_cell_voltage_10
+            name: Cell 10
+          - entity: sensor.hubble_am2_combined_master_cell_voltage_11
+            name: Cell 11
+          - entity: sensor.hubble_am2_combined_master_cell_voltage_12
+            name: Cell 12
+          - entity: sensor.hubble_am2_combined_master_cell_voltage_13
+            name: Cell 13
+
+      - type: entities
+        title: Slave Cell Voltages
+        show_header_toggle: false
+        entities:
+          - entity: sensor.hubble_am2_combined_slave_cell_voltage_1
+            name: Cell 1
+          - entity: sensor.hubble_am2_combined_slave_cell_voltage_2
+            name: Cell 2
+          - entity: sensor.hubble_am2_combined_slave_cell_voltage_3
+            name: Cell 3
+          - entity: sensor.hubble_am2_combined_slave_cell_voltage_4
+            name: Cell 4
+          - entity: sensor.hubble_am2_combined_slave_cell_voltage_5
+            name: Cell 5
+          - entity: sensor.hubble_am2_combined_slave_cell_voltage_6
+            name: Cell 6
+          - entity: sensor.hubble_am2_combined_slave_cell_voltage_7
+            name: Cell 7
+          - entity: sensor.hubble_am2_combined_slave_cell_voltage_8
+            name: Cell 8
+          - entity: sensor.hubble_am2_combined_slave_cell_voltage_9
+            name: Cell 9
+          - entity: sensor.hubble_am2_combined_slave_cell_voltage_10
+            name: Cell 10
+          - entity: sensor.hubble_am2_combined_slave_cell_voltage_11
+            name: Cell 11
+          - entity: sensor.hubble_am2_combined_slave_cell_voltage_12
+            name: Cell 12
+          - entity: sensor.hubble_am2_combined_slave_cell_voltage_13
+            name: Cell 13
+
+  # ============================================================
+  # MASTER / SLAVE CELL BALANCING
+  # Hubble AM2 is 13S, so only cells 1-13 are shown.
+  # ============================================================
+  - type: grid
+    columns: 2
+    square: false
+    cards:
+      - type: entities
+        title: Master Cell Balancing
+        show_header_toggle: false
+        entities:
+          - entity: binary_sensor.hubble_am2_combined_master_cell_balancing_1
+            name: Cell 1
+          - entity: binary_sensor.hubble_am2_combined_master_cell_balancing_2
+            name: Cell 2
+          - entity: binary_sensor.hubble_am2_combined_master_cell_balancing_3
+            name: Cell 3
+          - entity: binary_sensor.hubble_am2_combined_master_cell_balancing_4
+            name: Cell 4
+          - entity: binary_sensor.hubble_am2_combined_master_cell_balancing_5
+            name: Cell 5
+          - entity: binary_sensor.hubble_am2_combined_master_cell_balancing_6
+            name: Cell 6
+          - entity: binary_sensor.hubble_am2_combined_master_cell_balancing_7
+            name: Cell 7
+          - entity: binary_sensor.hubble_am2_combined_master_cell_balancing_8
+            name: Cell 8
+          - entity: binary_sensor.hubble_am2_combined_master_cell_balancing_9
+            name: Cell 9
+          - entity: binary_sensor.hubble_am2_combined_master_cell_balancing_10
+            name: Cell 10
+          - entity: binary_sensor.hubble_am2_combined_master_cell_balancing_11
+            name: Cell 11
+          - entity: binary_sensor.hubble_am2_combined_master_cell_balancing_12
+            name: Cell 12
+          - entity: binary_sensor.hubble_am2_combined_master_cell_balancing_13
+            name: Cell 13
+
+      - type: entities
+        title: Slave Cell Balancing
+        show_header_toggle: false
+        entities:
+          - entity: binary_sensor.hubble_am2_combined_slave_cell_balancing_1
+            name: Cell 1
+          - entity: binary_sensor.hubble_am2_combined_slave_cell_balancing_2
+            name: Cell 2
+          - entity: binary_sensor.hubble_am2_combined_slave_cell_balancing_3
+            name: Cell 3
+          - entity: binary_sensor.hubble_am2_combined_slave_cell_balancing_4
+            name: Cell 4
+          - entity: binary_sensor.hubble_am2_combined_slave_cell_balancing_5
+            name: Cell 5
+          - entity: binary_sensor.hubble_am2_combined_slave_cell_balancing_6
+            name: Cell 6
+          - entity: binary_sensor.hubble_am2_combined_slave_cell_balancing_7
+            name: Cell 7
+          - entity: binary_sensor.hubble_am2_combined_slave_cell_balancing_8
+            name: Cell 8
+          - entity: binary_sensor.hubble_am2_combined_slave_cell_balancing_9
+            name: Cell 9
+          - entity: binary_sensor.hubble_am2_combined_slave_cell_balancing_10
+            name: Cell 10
+          - entity: binary_sensor.hubble_am2_combined_slave_cell_balancing_11
+            name: Cell 11
+          - entity: binary_sensor.hubble_am2_combined_slave_cell_balancing_12
+            name: Cell 12
+          - entity: binary_sensor.hubble_am2_combined_slave_cell_balancing_13
+            name: Cell 13
+
+  # ============================================================
+  # DIAGNOSTICS / IDENTITY
+  # ============================================================
+  - type: entities
+    title: Diagnostics / Identity
+    show_header_toggle: false
+    entities:
+      - entity: sensor.hubble_am2_combined_master_bms_serial_number
+        name: Master BMS Serial
+      - entity: sensor.hubble_am2_combined_master_battery_pack_serial_number
+        name: Master Pack Serial
+      - entity: sensor.hubble_am2_combined_master_version_information
+        name: Master Version
+      - entity: sensor.hubble_am2_combined_slave_bms_serial_number
+        name: Slave BMS Serial
+      - entity: sensor.hubble_am2_combined_slave_battery_pack_serial_number
+        name: Slave Pack Serial
+      - entity: sensor.hubble_am2_combined_slave_version_information
+        name: Slave Version
+
+grid_options:
+  columns: 18
+  rows: auto
