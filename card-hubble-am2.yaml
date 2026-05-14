@@ -3,10 +3,6 @@ cards:
   - type: heading
     heading: Hubble AM2 Combined Battery
     heading_style: title
-
-  # ============================================================
-  # COMBINED BATTERY OVERVIEW
-  # ============================================================
   - type: grid
     columns: 2
     square: false
@@ -42,35 +38,27 @@ cards:
         entity: sensor.hubble_am2_combined_combined_worst_delta_cell_voltage
         name: Worst Cell Delta
       - type: tile
-        entity: sensor.hubble_am2_combined_combined_projected_runtime
+        entity: sensor.hubble_am2_combined_combined_projected_runtime_text
         name: Projected Runtime
       - type: tile
-        entity: sensor.hubble_am2_combined_combined_projected_charging_time
+        entity: sensor.hubble_am2_combined_combined_projected_charging_time_text
         name: Charging Time to Full
-
-  # ============================================================
-  # PROJECTED RUNTIME / CHARGING TIME
-  # ============================================================
   - type: entities
     title: Projected Runtime / Charging Time
     show_header_toggle: false
     entities:
-      - entity: sensor.hubble_am2_combined_combined_projected_runtime
+      - entity: sensor.hubble_am2_combined_combined_projected_runtime_text
         name: Combined Runtime Remaining
-      - entity: sensor.hubble_am2_combined_combined_projected_charging_time
+      - entity: sensor.hubble_am2_combined_combined_projected_charging_time_text
         name: Combined Charging Time to Full
-      - entity: sensor.hubble_am2_combined_master_projected_runtime
+      - entity: sensor.hubble_am2_combined_master_projected_runtime_text
         name: Master Runtime Remaining
-      - entity: sensor.hubble_am2_combined_master_projected_charging_time
+      - entity: sensor.hubble_am2_combined_master_projected_charging_time_text
         name: Master Charging Time to Full
-      - entity: sensor.hubble_am2_combined_slave_projected_runtime
+      - entity: sensor.hubble_am2_combined_slave_projected_runtime_text
         name: Slave Runtime Remaining
-      - entity: sensor.hubble_am2_combined_slave_projected_charging_time
+      - entity: sensor.hubble_am2_combined_slave_projected_charging_time_text
         name: Slave Charging Time to Full
-
-  # ============================================================
-  # COMBINED CELL HEALTH
-  # ============================================================
   - type: entities
     title: Combined Cell Health
     show_header_toggle: false
@@ -85,10 +73,6 @@ cards:
         name: Worst Delta Cell Voltage
       - entity: sensor.hubble_am2_combined_combined_total_detected_cell_count
         name: Total Detected Cells
-
-  # ============================================================
-  # MASTER / SLAVE PACK SUMMARY
-  # ============================================================
   - type: grid
     columns: 2
     square: false
@@ -123,7 +107,6 @@ cards:
             name: Projected Runtime
           - entity: sensor.hubble_am2_combined_master_projected_charging_time
             name: Charging Time to Full
-
       - type: entities
         title: Slave Pack Summary
         show_header_toggle: false
@@ -154,10 +137,6 @@ cards:
             name: Projected Runtime
           - entity: sensor.hubble_am2_combined_slave_projected_charging_time
             name: Charging Time to Full
-
-  # ============================================================
-  # MASTER / SLAVE CELL HEALTH
-  # ============================================================
   - type: grid
     columns: 2
     square: false
@@ -178,7 +157,6 @@ cards:
             name: Maximum Voltage Cell
           - entity: sensor.hubble_am2_combined_master_balancer_status
             name: Balancer Bitmask
-
       - type: entities
         title: Slave Cell Health
         show_header_toggle: false
@@ -195,10 +173,6 @@ cards:
             name: Maximum Voltage Cell
           - entity: sensor.hubble_am2_combined_slave_balancer_status
             name: Balancer Bitmask
-
-  # ============================================================
-  # MASTER / SLAVE TEMPERATURES
-  # ============================================================
   - type: grid
     columns: 2
     square: false
@@ -219,7 +193,6 @@ cards:
             name: MOSFET Temp
           - entity: sensor.hubble_am2_combined_master_environment_temperature
             name: Environment Temp
-
       - type: entities
         title: Slave Temperatures
         show_header_toggle: false
@@ -236,10 +209,6 @@ cards:
             name: MOSFET Temp
           - entity: sensor.hubble_am2_combined_slave_environment_temperature
             name: Environment Temp
-
-  # ============================================================
-  # MASTER / SLAVE BMS STATUS
-  # ============================================================
   - type: grid
     columns: 2
     square: false
@@ -270,7 +239,6 @@ cards:
             name: Protections Bitmask
           - entity: sensor.hubble_am2_combined_master_fault_status_bitmask
             name: Fault Status Bitmask
-
       - type: entities
         title: Slave BMS Status
         show_header_toggle: false
@@ -297,11 +265,6 @@ cards:
             name: Protections Bitmask
           - entity: sensor.hubble_am2_combined_slave_fault_status_bitmask
             name: Fault Status Bitmask
-
-  # ============================================================
-  # MASTER / SLAVE CELL VOLTAGES
-  # Hubble AM2 is 13S, so only cells 1-13 are shown.
-  # ============================================================
   - type: grid
     columns: 2
     square: false
@@ -336,7 +299,6 @@ cards:
             name: Cell 12
           - entity: sensor.hubble_am2_combined_master_cell_voltage_13
             name: Cell 13
-
       - type: entities
         title: Slave Cell Voltages
         show_header_toggle: false
@@ -367,11 +329,6 @@ cards:
             name: Cell 12
           - entity: sensor.hubble_am2_combined_slave_cell_voltage_13
             name: Cell 13
-
-  # ============================================================
-  # MASTER / SLAVE CELL BALANCING
-  # Hubble AM2 is 13S, so only cells 1-13 are shown.
-  # ============================================================
   - type: grid
     columns: 2
     square: false
@@ -406,7 +363,6 @@ cards:
             name: Cell 12
           - entity: binary_sensor.hubble_am2_combined_master_cell_balancing_13
             name: Cell 13
-
       - type: entities
         title: Slave Cell Balancing
         show_header_toggle: false
@@ -437,10 +393,6 @@ cards:
             name: Cell 12
           - entity: binary_sensor.hubble_am2_combined_slave_cell_balancing_13
             name: Cell 13
-
-  # ============================================================
-  # DIAGNOSTICS / IDENTITY
-  # ============================================================
   - type: entities
     title: Diagnostics / Identity
     show_header_toggle: false
@@ -457,7 +409,6 @@ cards:
         name: Slave Pack Serial
       - entity: sensor.hubble_am2_combined_slave_version_information
         name: Slave Version
-
 grid_options:
   columns: 18
   rows: auto
