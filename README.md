@@ -1,5 +1,8 @@
 # ESPHome Hubble AM2 PACE BMS Monitor
 
+> Current stable configuration reference: `hubble-am2-combined-v2.1-balanced-cell-startup.yaml`
+
+
 ESPHome Hubble AM2 PACE BMS Monitor is an ESP32 RS485/Modbus configuration for monitoring Hubble AM2 battery packs in Home Assistant.
 
 It is built for Hubble AM2 batteries that use a PACE-based BMS and exposes detailed battery information through ESPHome, MQTT, and Home Assistant.
@@ -7,20 +10,6 @@ It is built for Hubble AM2 batteries that use a PACE-based BMS and exposes detai
 The project supports a Master/Slave two-pack setup, automatic valid 13-cell detection, per-pack diagnostics, combined battery-bank calculations, projected runtime, projected charging time, and fault visibility without hiding stale or failed data.
 
 ---
-
-## Suggested GitHub Repository
-
-Recommended repository name:
-
-```text
-esphome-hubble-am2-pace-bms
-```
-
-Recommended GitHub description:
-
-```text
-ESPHome monitor for Hubble AM2 PACE RS485/Modbus batteries with Master/Slave support, auto cell detection, MQTT/Home Assistant integration, and combined battery-bank sensors.
-```
 
 ---
 
@@ -116,15 +105,17 @@ uart:
     parity: NONE
 ```
 
-Typical Modbus configuration:
+Typical Modbus configuration used by the stable v2.1 file:
 
 ```yaml
 modbus:
   - id: modbus0
     uart_id: uart_0
     flow_control_pin: GPIO18
-    send_wait_time: 500ms
+    send_wait_time: 750ms
 ```
+
+The `750ms` wait time is intentionally conservative because both Master and Slave batteries share one physical RS485 bus. This helps prevent shifted/corrupted reads and random unavailable values during polling.
 
 ---
 
@@ -191,7 +182,7 @@ Hubble AM2 Master = 0x01
 Hubble AM2 Slave  = 0x02
 ```
 
-Example ESPHome Modbus controller section:
+Example ESPHome Modbus controller section used by the stable v2.1 file:
 
 ```yaml
 modbus_controller:
@@ -200,9 +191,9 @@ modbus_controller:
     address: 0x01
     modbus_id: modbus0
     setup_priority: -10
-    command_throttle: 500ms
+    command_throttle: 750ms
     update_interval: 30s
-    offline_skip_updates: 5
+    offline_skip_updates: 3
 
   # Hubble AM2 Slave
   - id: bms_slave
@@ -210,9 +201,11 @@ modbus_controller:
     modbus_id: modbus0
     setup_priority: -10
     command_throttle: 750ms
-    update_interval: 45s
-    offline_skip_updates: 5
+    update_interval: 35s
+    offline_skip_updates: 3
 ```
+
+The Master and Slave update intervals are staggered slightly. This reduces the chance of both batteries being polled at the same moment on the shared RS485 bus.
 
 If the Slave battery does not respond, check that it is physically connected to the same RS485 bus and configured with a unique Modbus address.
 
@@ -487,13 +480,105 @@ This helps ensure that Home Assistant cards show actual live data rather than ol
 
 ---
 
+## MQTT Startup Protection
+
+The v2.1 configuration includes MQTT startup protection to reduce message flooding when the ESP32 boots and many sensors publish at the same time.
+
+Key behaviours:
+
+```text
+MQTT logs are not published into MQTT
+MQTT birth, will and shutdown messages are disabled
+MQTT keepalive is set to 30s
+MQTT async sending is disabled
+Heavy cell-voltage publishing is delayed briefly after boot
+```
+
+Recommended MQTT behaviour:
+
+```yaml
+mqtt:
+  log_topic: null
+  keepalive: 30s
+  reboot_timeout: 0s
+  birth_message:
+  will_message:
+  shutdown_message:
+  idf_send_async: false
+```
+
+This helps prevent dropped MQTT messages during startup when the ESP32 publishes battery values, cell values and diagnostics together.
+
+---
+
+## Cell Voltage Startup Behaviour
+
+To reduce MQTT startup flooding, individual cell-voltage publishing is delayed for approximately 30 seconds after boot.
+
+Expected behaviour after restart:
+
+```text
+Main pack values appear first
+Individual cell voltages appear after the startup delay
+Combined cell-health values become valid after both Master and Slave cell batches have reported
+```
+
+This is normal and does not indicate a Modbus fault. The main battery dashboard should become usable quickly, while detailed cell-health cards may take slightly longer after a reboot.
+
+The configuration may also use small delta filters on individual cell-voltage sensors. This means a cell sensor may not republish if the value has not changed enough. Home Assistant will continue showing the last valid value, which reduces MQTT and database load.
+
+---
+
+## Dashboard Behaviour After Reboot
+
+After the ESP32 restarts, Home Assistant may show the main battery values before detailed cell values.
+
+Typical startup order:
+
+```text
+SOC, current, voltage, power and capacity appear first
+Individual cell voltages appear after the startup delay
+Combined cell values appear once both Master and Slave cell readings are available
+```
+
+Recommended dashboard layout:
+
+```text
+Main battery card:
+Combined SOC
+Combined current
+Combined power
+Average pack voltage
+Remaining capacity
+SOH
+Runtime / charging time
+
+Detail / diagnostic card:
+Master and Slave cell voltages
+Lowest and highest cell voltage
+Worst delta cell voltage
+Temperatures
+Warnings, protections and fault bitmasks
+```
+
+For normal users, the main dashboard card should remain clean and responsive. The detailed cell card may take a short time to populate after reboot.
+
+---
+
 ## MQTT and Home Assistant
 
-Suggested MQTT identity for this project:
+Suggested MQTT identity and stable behaviour for this project:
 
 ```yaml
 mqtt:
   topic_prefix: hubble_am2/combined
+  log_topic: null
+  keepalive: 30s
+  reboot_timeout: 0s
+  birth_message:
+  will_message:
+  shutdown_message:
+  idf_send_async: false
 ```
 
 Suggested ESPHome identity:
@@ -607,6 +692,26 @@ This is normal when the battery is not discharging or when current is too close 
 ### Warnings show Cell Overvoltage / Battery Full
 
 This can happen when the battery is full and individual cells are near the upper protection threshold. Check the BMS status, cell voltages, inverter charge settings, and manufacturer limits.
+
+### Cell readings take about 30 seconds to appear after reboot
+
+This is expected in the v2.1 configuration.
+
+The configuration delays heavy cell-voltage publishing after startup to reduce MQTT queue flooding. Main battery values should appear first. Cell-voltage and combined cell-health values become available once both Master and Slave cell batches have reported.
+
+### MQTT dropped messages at startup
+
+If logs show dropped MQTT messages, check:
+
+```text
+MQTT log_topic is disabled
+idf_send_async is false
+Cell voltage startup delay is enabled
+Too many diagnostic sensors are not publishing too frequently
+Wi-Fi signal is stable
+```
+
+If the main values are stable but the dropped-message warning appears only once at boot, the system may still be usable. Repeated MQTT dropped-message warnings during normal operation indicate the ESP32, Wi-Fi or MQTT broker is being overloaded.
 
 ---
 
