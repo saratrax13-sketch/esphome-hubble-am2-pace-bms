@@ -106,8 +106,8 @@ logger:
     modbus_controller: ERROR
     mqtt: ERROR
     api: ERROR
-    sensor: INFO
-    text_sensor: INFO
+    sensor: WARN
+    text_sensor: WARN
 
 # ------------------------------------------------------------
 # ESPHOME API / OTA
