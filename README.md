@@ -11,20 +11,6 @@ The project supports a Master/Slave two-pack setup, automatic valid 13-cell dete
 
 ---
 
-## Suggested GitHub Repository
-
-Recommended repository name:
-
-```text
-esphome-hubble-am2-pace-bms
-```
-
-Recommended GitHub description:
-
-```text
-ESPHome monitor for Hubble AM2 PACE RS485/Modbus batteries with Master/Slave support, auto cell detection, MQTT/Home Assistant integration, and combined battery-bank sensors.
-```
-
 ---
 
 ## What This Project Does
