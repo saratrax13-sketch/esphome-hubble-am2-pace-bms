@@ -1,6 +1,6 @@
 # ESPHome Hubble AM2 PACE BMS Monitor
 
-> Current stable configuration reference: `hubble-am2-combined-v2.1-balanced-cell-startup.yaml`
+> Current stable configuration reference: `hubble-am2-combined-v2.3-balanced-cell-diagnostics.yaml`
 
 
 ESPHome Hubble AM2 PACE BMS Monitor is an ESP32 RS485/Modbus configuration for monitoring Hubble AM2 battery packs in Home Assistant.
@@ -61,6 +61,10 @@ The project is monitoring-only. It does not write settings to the BMS.
 - Projected charging time in minutes
 - MQTT/Home Assistant support
 - Timeout handling to avoid stale data being shown as live data
+- Detailed cell-voltage diagnostics retained for fault finding
+- Per-cell balancing entities disabled by default in Home Assistant to reduce dashboard clutter
+- Optimized Modbus range reads for lower RS485 bus load
+- Local ESPHome web server disabled in the current diagnostic configuration
 - Clear comments inside the ESPHome YAML for maintenance and troubleshooting
 
 ---
@@ -105,7 +109,7 @@ uart:
     parity: NONE
 ```
 
-Typical Modbus configuration used by the stable v2.1 file:
+Typical Modbus configuration used by the stable v2.3 file:
 
 ```yaml
 modbus:
@@ -182,7 +186,7 @@ Hubble AM2 Master = 0x01
 Hubble AM2 Slave  = 0x02
 ```
 
-Example ESPHome Modbus controller section used by the stable v2.1 file:
+Example ESPHome Modbus controller section used by the stable v2.3 file:
 
 ```yaml
 modbus_controller:
@@ -482,7 +486,7 @@ This helps ensure that Home Assistant cards show actual live data rather than ol
 
 ## MQTT Startup Protection
 
-The v2.1 configuration includes MQTT startup protection to reduce message flooding when the ESP32 boots and many sensors publish at the same time.
+The v2.3 configuration includes MQTT startup protection to reduce message flooding when the ESP32 boots and many sensors publish at the same time.
 
 Key behaviours:
 
@@ -587,7 +591,19 @@ Suggested ESPHome identity:
 substitutions:
   name: hubble-am2-combined
   friendly_name: "Hubble AM2 Combined"
-  device_description: "Hubble AM2 Master/Slave PACE RS485 battery monitor"
+  device_description: "Hubble AM2 Combined Master and Slave battery monitor via RS485/Modbus to MQTT - v2.3 diagnostics optimized polling"
+```
+
+Current v2.3 behaviour:
+
+```text
+Master pack Modbus polling: 30s
+Slave pack Modbus polling: 35s
+Combined/template recalculation: 10s
+Wi-Fi signal and ESP32 uptime: 60s
+Local web server: disabled
+Per-cell voltage diagnostics: enabled
+Per-cell balancing binary sensors: disabled by default in Home Assistant
 ```
 
 Example Home Assistant entities:
@@ -695,7 +711,7 @@ This can happen when the battery is full and individual cells are near the upper
 
 ### Cell readings take about 30 seconds to appear after reboot
 
-This is expected in the v2.1 configuration.
+This is expected in the v2.3 configuration.
 
 The configuration delays heavy cell-voltage publishing after startup to reduce MQTT queue flooding. Main battery values should appear first. Cell-voltage and combined cell-health values become available once both Master and Slave cell batches have reported.
 
