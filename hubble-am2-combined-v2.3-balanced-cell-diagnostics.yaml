@@ -1,0 +1,3054 @@
+﻿# Hubble AM2 Combined - v2.3 balanced diagnostics + optimized polling
+# ============================================================
+# Hubble AM2 Combined RS485 Monitor
+# Version: 2026-05-15 v2.3 - detailed cell diagnostics, optimized Modbus ranges, web server disabled
+# ============================================================
+#
+# PURPOSE
+#   Fresh ESP32 that reads BOTH Hubble AM2 packs on one shared RS485 bus.
+#   This does NOT replace the old Master and Slave YAML files until you decide
+#   to retire them. The old setup can remain as fallback during testing.
+#
+# PHYSICAL PACK LAYOUT
+#   Master pack = Modbus address 0x01
+#   Slave pack  = Modbus address 0x02
+#
+# MQTT LAYOUT
+#   New clean MQTT topic prefix: hubble_am2/combined
+#   This avoids conflict with the old Master/Slave MQTT devices.
+#
+# CELL DETECTION STRATEGY
+#   Each pack is read as if it could have up to 16 cells.
+#   The code only counts cell registers with realistic lithium cell voltages.
+#   This supports Hubble AM2 13S packs while remaining useful for other packs.
+#
+# LIVE DATA TRUST STRATEGY
+#   The dashboard should only show fresh actual values.
+#   Invalid values are rejected as NAN.
+#   Live numeric sensors have timeout filters so stale values become unavailable.
+#   Timeout is set to 600s because this full YAML exposes many Master/Slave
+#   sensors and the complete polling queue can exceed 90s.
+#   Combined values require both Master and Slave data; if one pack is not fresh,
+#   the combined total also becomes unavailable instead of showing a partial total.
+#
+# PARALLEL BATTERY RULES
+#   Capacity/current/power can be added across packs.
+#   Pack voltage must NOT be added when batteries are in parallel.
+#   Combined voltage is calculated as an average of valid pack voltages.
+#
+# IMPORTANT RS485 NOTE
+#   Do not permanently leave multiple ESP32 devices polling the same BMS bus
+#   if readings become unstable. Use the old Master/Slave ESP32s for comparison
+#   during commissioning, then keep only one polling solution active long-term.
+#
+# ============================================================
+
+# ------------------------------------------------------------
+# GLOBAL SUBSTITUTIONS
+# ------------------------------------------------------------
+# Central place for device name and RS485 pin mapping.
+# Change pins here only if your RS485 module is wired differently.
+
+substitutions:
+  name: hubble-am2-combined
+  device_description: "Hubble AM2 Combined Master and Slave battery monitor via RS485/Modbus to MQTT - v2.3 diagnostics optimized polling"
+  tx_pin: GPIO16
+  rx_pin: GPIO17
+  flow_control_pin: GPIO18
+  # Live data timeout: if a live numeric sensor does not receive a fresh
+  # valid value within this period, Home Assistant will show unavailable.
+  # Set to 600s to avoid false unavailable states while the full Master +
+  # Slave + cell + temperature + status polling queue completes.
+  # This still prevents stale values from being held indefinitely.
+  live_data_timeout: 600s
+  # Static data timeout: used only for slow-changing values that are polled
+  # less often, such as full/design capacity and cycle count.
+  static_data_timeout: 3600s
+  # Combined/template recalculation interval. This does not poll Modbus; it only
+  # recalculates from the latest valid source sensors already protected by
+  # range guards and timeout filters.
+  combined_update_interval: 10s
+  # Prevent combined/template sensors from publishing incomplete startup values
+  # before both BMS packs have had time to report valid source data.
+  startup_publish_delay_ms: "30000"
+  # Delay high-volume source/template publishing, especially cell-voltage batches,
+  # so MQTT has time to connect and Home Assistant discovery has time to settle.
+  # Balanced setting: 30 seconds. This keeps MQTT startup protection while making
+  # detailed cell cards populate sooner after a reboot.
+  source_publish_delay_ms: "30000"
+
+# ------------------------------------------------------------
+# ESPHOME DEVICE IDENTITY
+# ------------------------------------------------------------
+# This is a fresh node so Home Assistant/MQTT discovery creates a new device.
+
+esphome:
+  name: ${name}
+  friendly_name: "Hubble AM2 Combined"
+  comment: ${device_description}
+  min_version: 2024.6.0
+
+# ------------------------------------------------------------
+# ESP32 BUILD TARGET
+# ------------------------------------------------------------
+# Uses ESP-IDF as per the existing stable Master/Slave monitor pattern.
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+    advanced:
+      minimum_chip_revision: "3.0"
+      sram1_as_iram: true
+
+# ------------------------------------------------------------
+# LOGGING
+# ------------------------------------------------------------
+# WARN keeps production logging quiet. Temporarily change to INFO/DEBUG for
+# commissioning if you need to see cell-detection or Modbus troubleshooting.
+
+logger:
+  level: WARN
+  logs:
+    modbus: ERROR
+    modbus_controller: ERROR
+    mqtt: ERROR
+    api: ERROR
+    sensor: WARN
+    text_sensor: WARN
+
+# ------------------------------------------------------------
+# ESPHOME API / OTA
+# ------------------------------------------------------------
+# API allows ESPHome/Home Assistant management. MQTT remains the main sensor
+# publishing method in this configuration.
+
+# IMPORTANT:
+#   MQTT is the main sensor publishing method for this monitor.
+#   ESPHome's native API default reboot timeout can restart the ESP32
+#   if the API is not continuously connected. reboot_timeout: 0s prevents
+#   the 10-15 minute reboot pattern seen in Home Assistant uptime history.
+#
+api:
+  reboot_timeout: 0s
+  encryption:
+    key: !secret api_key_combined
+
+ota:
+  - platform: esphome
+    password: !secret ota_password_combined
+
+# ------------------------------------------------------------
+# WIFI CONFIGURATION
+# ------------------------------------------------------------
+# Static IP is intentional so the device is easy to find during maintenance.
+# Change 192.168.10.213 if it conflicts with your network.
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  fast_connect: true
+  power_save_mode: none
+  reboot_timeout: 0s
+
+  manual_ip:
+    static_ip: 192.168.10.213
+    gateway: 192.168.10.1
+    subnet: 255.255.255.0
+    dns1: 192.168.10.1
+
+  ap:
+    ssid: "Hubble Combined Fallback Hotspot"
+    password: !secret combined_fallback_password
+
+# ------------------------------------------------------------
+# MQTT CONFIGURATION
+# ------------------------------------------------------------
+# Fresh topic prefix for the combined monitor. This avoids overwriting or
+# confusing the existing hubble_am2/master and hubble_am2/slave devices.
+
+mqtt:
+  broker: !secret mqtt_broker
+  username: !secret mqtt_username
+  password: !secret mqtt_password
+  port: !secret mqtt_port
+  topic_prefix: hubble_am2/combined
+  discovery: true
+  discovery_retain: false
+  discovery_unique_id_generator: mac
+  discovery_object_id_generator: device_name
+  # Synchronous MQTT send avoids ESP-IDF async queue overflow during startup bursts.
+  idf_send_async: false
+  keepalive: 30s
+  reboot_timeout: 0s
+  publish_nan_as_none: true
+  log_topic: null
+  birth_message:
+  will_message:
+  shutdown_message:
+
+# ------------------------------------------------------------
+# LOCAL WEB SERVER DISABLED
+# Web server removed for production/diagnostic stability. Re-enable only during commissioning if needed.
+
+# UART / RS485 HARDWARE BUS
+# ------------------------------------------------------------
+# GPIO16 = TX, GPIO17 = RX, GPIO18 = DE/RE flow control.
+# Both batteries share this bus, but each has a different Modbus address.
+
+uart:
+  - id: uart_0
+    baud_rate: 9600
+    tx_pin: ${tx_pin}
+    rx_pin: ${rx_pin}
+    stop_bits: 1
+    rx_buffer_size: 512
+
+# ------------------------------------------------------------
+# MODBUS BUS SETTINGS
+# ------------------------------------------------------------
+# send_wait_time helps the shared RS485 transceiver settle between requests.
+# 750ms is intentional for two BMS controllers on one physical bus.
+
+modbus:
+  - id: modbus0
+    uart_id: uart_0
+    flow_control_pin: ${flow_control_pin}
+    send_wait_time: 750ms
+
+# ------------------------------------------------------------
+# MODBUS CONTROLLERS / PHYSICAL BATTERY ADDRESSES
+# ------------------------------------------------------------
+# bms_master talks to the Master pack at 0x01.
+# bms_slave talks to the Slave pack at 0x02.
+# Update intervals are staggered to reduce bus congestion.
+# Combined/template sensors recalculate faster, but Modbus polling remains conservative.
+
+modbus_controller:
+  - id: bms_master
+    # Hubble Master address
+    address: 0x01
+    modbus_id: modbus0
+    setup_priority: -10
+    command_throttle: 750ms
+    update_interval: 30s
+    offline_skip_updates: 3
+
+  - id: bms_slave
+    # Hubble Slave address
+    address: 0x02
+    modbus_id: modbus0
+    setup_priority: -10
+    command_throttle: 750ms
+    update_interval: 35s
+    offline_skip_updates: 3
+
+# ============================================================
+# BINARY SENSORS
+# ============================================================
+# Exposes live status bits and per-cell balancing flags.
+# These are useful for seeing whether a pack is charging, discharging,
+# balancing, or being limited by the BMS.
+
+binary_sensor:
+  # ------------------------------------------------------------
+  # DEVICE CONNECTION STATUS
+  # ------------------------------------------------------------
+  # ESPHome online/offline status for the combined ESP32 itself.
+
+  - platform: status
+    name: "connection"
+    entity_category: diagnostic
+
+  # ------------------------------------------------------------
+  # MASTER PACK STATUS AND BALANCING BITS
+  # ------------------------------------------------------------
+  # Register 11 exposes operating state bits.
+  # Register 12 exposes balancing bits for cells 1-16.
+
+  - platform: modbus_controller
+    modbus_controller_id: bms_master
+    name: "master charging operation"
+    address: 11
+    register_type: holding
+    bitmask: 0x0100
+  - platform: modbus_controller
+    modbus_controller_id: bms_master
+    name: "master discharging operation"
+    address: 11
+    register_type: holding
+    bitmask: 0x0200
+  - platform: modbus_controller
+    modbus_controller_id: bms_master
+    name: "master charging"
+    address: 11
+    register_type: holding
+    bitmask: 0x0400
+  - platform: modbus_controller
+    modbus_controller_id: bms_master
+    name: "master discharging"
+    address: 11
+    register_type: holding
+    bitmask: 0x0800
+  - platform: modbus_controller
+    modbus_controller_id: bms_master
+    name: "master cell balancing 1"
+    address: 12
+    register_type: holding
+    bitmask: 0x0001
+    entity_category: diagnostic
+    disabled_by_default: true
+  - platform: modbus_controller
+    modbus_controller_id: bms_master
+    name: "master cell balancing 2"
+    address: 12
+    register_type: holding
+    bitmask: 0x0002
+    entity_category: diagnostic
+    disabled_by_default: true
+  - platform: modbus_controller
+    modbus_controller_id: bms_master
+    name: "master cell balancing 3"
+    address: 12
+    register_type: holding
+    bitmask: 0x0004
+    entity_category: diagnostic
+    disabled_by_default: true
+  - platform: modbus_controller
+    modbus_controller_id: bms_master
+    name: "master cell balancing 4"
+    address: 12
+    register_type: holding
+    bitmask: 0x0008
+    entity_category: diagnostic
+    disabled_by_default: true
+  - platform: modbus_controller
+    modbus_controller_id: bms_master
+    name: "master cell balancing 5"
+    address: 12
+    register_type: holding
+    bitmask: 0x0010
+    entity_category: diagnostic
+    disabled_by_default: true
+  - platform: modbus_controller
+    modbus_controller_id: bms_master
+    name: "master cell balancing 6"
+    address: 12
+    register_type: holding
+    bitmask: 0x0020
+    entity_category: diagnostic
+    disabled_by_default: true
+  - platform: modbus_controller
+    modbus_controller_id: bms_master
+    name: "master cell balancing 7"
+    address: 12
+    register_type: holding
+    bitmask: 0x0040
+    entity_category: diagnostic
+    disabled_by_default: true
+  - platform: modbus_controller
+    modbus_controller_id: bms_master
+    name: "master cell balancing 8"
+    address: 12
+    register_type: holding
+    bitmask: 0x0080
+    entity_category: diagnostic
+    disabled_by_default: true
+  - platform: modbus_controller
+    modbus_controller_id: bms_master
+    name: "master cell balancing 9"
+    address: 12
+    register_type: holding
+    bitmask: 0x0100
+    entity_category: diagnostic
+    disabled_by_default: true
+  - platform: modbus_controller
+    modbus_controller_id: bms_master
+    name: "master cell balancing 10"
+    address: 12
+    register_type: holding
+    bitmask: 0x0200
+    entity_category: diagnostic
+    disabled_by_default: true
+  - platform: modbus_controller
+    modbus_controller_id: bms_master
+    name: "master cell balancing 11"
+    address: 12
+    register_type: holding
+    bitmask: 0x0400
+    entity_category: diagnostic
+    disabled_by_default: true
+  - platform: modbus_controller
+    modbus_controller_id: bms_master
+    name: "master cell balancing 12"
+    address: 12
+    register_type: holding
+    bitmask: 0x0800
+    entity_category: diagnostic
+    disabled_by_default: true
+  - platform: modbus_controller
+    modbus_controller_id: bms_master
+    name: "master cell balancing 13"
+    address: 12
+    register_type: holding
+    bitmask: 0x1000
+    entity_category: diagnostic
+    disabled_by_default: true
+  - platform: modbus_controller
+    modbus_controller_id: bms_master
+    name: "master cell balancing 14"
+    address: 12
+    register_type: holding
+    bitmask: 0x2000
+    entity_category: diagnostic
+    disabled_by_default: true
+  - platform: modbus_controller
+    modbus_controller_id: bms_master
+    name: "master cell balancing 15"
+    address: 12
+    register_type: holding
+    bitmask: 0x4000
+    entity_category: diagnostic
+    disabled_by_default: true
+  - platform: modbus_controller
+    modbus_controller_id: bms_master
+    name: "master cell balancing 16"
+    address: 12
+    register_type: holding
+    bitmask: 0x8000
+    entity_category: diagnostic
+    disabled_by_default: true
+  # ------------------------------------------------------------
+  # SLAVE PACK STATUS AND BALANCING BITS
+  # ------------------------------------------------------------
+  # Same register map as Master, but read from Modbus address 0x02.
+
+  - platform: modbus_controller
+    modbus_controller_id: bms_slave
+    name: "slave charging operation"
+    address: 11
+    register_type: holding
+    bitmask: 0x0100
+  - platform: modbus_controller
+    modbus_controller_id: bms_slave
+    name: "slave discharging operation"
+    address: 11
+    register_type: holding
+    bitmask: 0x0200
+  - platform: modbus_controller
+    modbus_controller_id: bms_slave
+    name: "slave charging"
+    address: 11
+    register_type: holding
+    bitmask: 0x0400
+  - platform: modbus_controller
+    modbus_controller_id: bms_slave
+    name: "slave discharging"
+    address: 11
+    register_type: holding
+    bitmask: 0x0800
+  - platform: modbus_controller
+    modbus_controller_id: bms_slave
+    name: "slave cell balancing 1"
+    address: 12
+    register_type: holding
+    bitmask: 0x0001
+    entity_category: diagnostic
+    disabled_by_default: true
+  - platform: modbus_controller
+    modbus_controller_id: bms_slave
+    name: "slave cell balancing 2"
+    address: 12
+    register_type: holding
+    bitmask: 0x0002
+    entity_category: diagnostic
+    disabled_by_default: true
+  - platform: modbus_controller
+    modbus_controller_id: bms_slave
+    name: "slave cell balancing 3"
+    address: 12
+    register_type: holding
+    bitmask: 0x0004
+    entity_category: diagnostic
+    disabled_by_default: true
+  - platform: modbus_controller
+    modbus_controller_id: bms_slave
+    name: "slave cell balancing 4"
+    address: 12
+    register_type: holding
+    bitmask: 0x0008
+    entity_category: diagnostic
+    disabled_by_default: true
+  - platform: modbus_controller
+    modbus_controller_id: bms_slave
+    name: "slave cell balancing 5"
+    address: 12
+    register_type: holding
+    bitmask: 0x0010
+    entity_category: diagnostic
+    disabled_by_default: true
+  - platform: modbus_controller
+    modbus_controller_id: bms_slave
+    name: "slave cell balancing 6"
+    address: 12
+    register_type: holding
+    bitmask: 0x0020
+    entity_category: diagnostic
+    disabled_by_default: true
+  - platform: modbus_controller
+    modbus_controller_id: bms_slave
+    name: "slave cell balancing 7"
+    address: 12
+    register_type: holding
+    bitmask: 0x0040
+    entity_category: diagnostic
+    disabled_by_default: true
+  - platform: modbus_controller
+    modbus_controller_id: bms_slave
+    name: "slave cell balancing 8"
+    address: 12
+    register_type: holding
+    bitmask: 0x0080
+    entity_category: diagnostic
+    disabled_by_default: true
+  - platform: modbus_controller
+    modbus_controller_id: bms_slave
+    name: "slave cell balancing 9"
+    address: 12
+    register_type: holding
+    bitmask: 0x0100
+    entity_category: diagnostic
+    disabled_by_default: true
+  - platform: modbus_controller
+    modbus_controller_id: bms_slave
+    name: "slave cell balancing 10"
+    address: 12
+    register_type: holding
+    bitmask: 0x0200
+    entity_category: diagnostic
+    disabled_by_default: true
+  - platform: modbus_controller
+    modbus_controller_id: bms_slave
+    name: "slave cell balancing 11"
+    address: 12
+    register_type: holding
+    bitmask: 0x0400
+    entity_category: diagnostic
+    disabled_by_default: true
+  - platform: modbus_controller
+    modbus_controller_id: bms_slave
+    name: "slave cell balancing 12"
+    address: 12
+    register_type: holding
+    bitmask: 0x0800
+    entity_category: diagnostic
+    disabled_by_default: true
+  - platform: modbus_controller
+    modbus_controller_id: bms_slave
+    name: "slave cell balancing 13"
+    address: 12
+    register_type: holding
+    bitmask: 0x1000
+    entity_category: diagnostic
+    disabled_by_default: true
+  - platform: modbus_controller
+    modbus_controller_id: bms_slave
+    name: "slave cell balancing 14"
+    address: 12
+    register_type: holding
+    bitmask: 0x2000
+    entity_category: diagnostic
+    disabled_by_default: true
+  - platform: modbus_controller
+    modbus_controller_id: bms_slave
+    name: "slave cell balancing 15"
+    address: 12
+    register_type: holding
+    bitmask: 0x4000
+    entity_category: diagnostic
+    disabled_by_default: true
+  - platform: modbus_controller
+    modbus_controller_id: bms_slave
+    name: "slave cell balancing 16"
+    address: 12
+    register_type: holding
+    bitmask: 0x8000
+    entity_category: diagnostic
+    disabled_by_default: true
+
+# ============================================================
+# NUMERIC SENSORS
+# ============================================================
+# This section exposes all numeric pack data:
+# - Current, voltage, power, SOC, SOH, capacities and cycles
+# - Warning/protection/status bitmasks
+# - Cell voltages 1-16 for Master and Slave
+# - Auto-detected cell count per pack
+# - Calculated min/max/average/delta values
+# - Combined battery totals
+#
+# IMPORTANT DATA-INTEGRITY RULE:
+# Live numeric values use timeout filters. If the ESP32 stops receiving fresh
+# valid Modbus data, Home Assistant will show unavailable rather than a stale
+# last-good reading.
+
+sensor:
+  # =========================
+  # MASTER PACK SENSOR DATA
+  # =========================
+  # ------------------------------------------------------------
+  # MASTER PACK CORE ELECTRICAL SENSORS
+  # ------------------------------------------------------------
+  # Current and voltage are published from one batch Modbus read.
+  # Power is calculated as current x voltage.
+
+  - platform: template
+    id: master_current
+    name: "master current"
+    update_interval: never
+    unit_of_measurement: "A"
+    device_class: current
+    state_class: measurement
+    accuracy_decimals: 2
+    filters:
+      - timeout: ${live_data_timeout}
+
+  - platform: template
+    id: master_total_voltage
+    name: "master total voltage"
+    update_interval: never
+    unit_of_measurement: "V"
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 2
+    filters:
+      - timeout: ${live_data_timeout}
+
+  - platform: modbus_controller
+    modbus_controller_id: bms_master
+    id: master_power
+    name: "master power"
+    address: 0
+    force_new_range: true
+    register_type: holding
+    value_type: S_WORD
+    register_count: 2
+    response_size: 4
+    unit_of_measurement: "W"
+    device_class: power
+    state_class: measurement
+    accuracy_decimals: 1
+    filters:
+      - timeout: ${live_data_timeout}
+    lambda: |-
+      if (data.size() < 4) {
+        id(master_current).publish_state(NAN);
+        id(master_total_voltage).publish_state(NAN);
+        return NAN;
+      }
+
+      float current = (int16_t)((data[0] << 8) | data[1]) * 0.01f;
+      float total_voltage = (uint16_t)((data[2] << 8) | data[3]) * 0.01f;
+
+      if (current < -200.0f || current > 200.0f) {
+        ESP_LOGW("bms", "master rejected invalid current: %.2f", current);
+        id(master_current).publish_state(NAN);
+        id(master_total_voltage).publish_state(NAN);
+        return NAN;
+      }
+
+      // Hubble AM2 NMC 13-cell pack expected range. Keeps bad Modbus reads out of HA.
+      if (total_voltage < 40.0f || total_voltage > 58.5f) {
+        ESP_LOGW("bms", "master rejected invalid pack voltage: %.2f", total_voltage);
+        id(master_current).publish_state(NAN);
+        id(master_total_voltage).publish_state(NAN);
+        return NAN;
+      }
+
+      id(master_current).publish_state(current);
+      id(master_total_voltage).publish_state(total_voltage);
+
+      return current * total_voltage;
+
+  - platform: modbus_controller
+    modbus_controller_id: bms_master
+    id: master_state_of_charge
+    name: "master state of charge"
+    address: 2
+    register_type: holding
+    value_type: U_WORD
+    unit_of_measurement: "%"
+    device_class: battery
+    state_class: measurement
+    accuracy_decimals: 0
+    filters:
+      - lambda: |-
+          if (x < 0.0f || x > 100.0f) return {};
+          return x;
+      - timeout: ${live_data_timeout}
+
+  - platform: modbus_controller
+    modbus_controller_id: bms_master
+    id: master_state_of_health
+    name: "master state of health"
+    address: 3
+    register_type: holding
+    value_type: U_WORD
+    unit_of_measurement: "%"
+    state_class: measurement
+    accuracy_decimals: 0
+    filters:
+      - timeout: ${live_data_timeout}
+    lambda: |-
+      if (x < 0 || x > 100) return NAN;
+      return x;
+
+  - platform: modbus_controller
+    modbus_controller_id: bms_master
+    id: master_remaining_capacity
+    name: "master remaining capacity"
+    address: 4
+    register_type: holding
+    value_type: U_WORD
+    unit_of_measurement: "Ah"
+    state_class: measurement
+    accuracy_decimals: 2
+    filters:
+      - multiply: 0.01
+      - lambda: |-
+          if (x < 0.0f || x > 250.0f) return {};
+          return x;
+      - timeout: ${live_data_timeout}
+  - platform: modbus_controller
+    modbus_controller_id: bms_master
+    id: master_full_capacity
+    name: "master full capacity"
+    skip_updates: 14
+    address: 5
+    register_type: holding
+    value_type: U_WORD
+    unit_of_measurement: "Ah"
+    state_class: measurement
+    accuracy_decimals: 2
+    filters:
+      - multiply: 0.01
+      - lambda: |-
+          if (x < 0.0f || x > 250.0f) return {};
+          return x;
+      - timeout: ${static_data_timeout}
+  - platform: modbus_controller
+    modbus_controller_id: bms_master
+    id: master_design_capacity
+    name: "master design capacity"
+    skip_updates: 14
+    address: 6
+    register_type: holding
+    value_type: U_WORD
+    unit_of_measurement: "Ah"
+    state_class: measurement
+    accuracy_decimals: 2
+    filters:
+      - multiply: 0.01
+      - lambda: |-
+          if (x < 0.0f || x > 250.0f) return {};
+          return x;
+      - timeout: ${static_data_timeout}
+  - platform: modbus_controller
+    modbus_controller_id: bms_master
+    id: master_charging_cycles
+    name: "master charging cycles"
+    skip_updates: 14
+    address: 7
+    register_type: holding
+    value_type: U_WORD
+    unit_of_measurement: "cycles"
+    state_class: measurement
+    accuracy_decimals: 0
+    filters:
+      - lambda: |-
+          if (x < 0.0f || x > 20000.0f) return {};
+          return x;
+      - timeout: ${static_data_timeout}
+
+  - platform: modbus_controller
+    modbus_controller_id: bms_master
+    id: master_warnings_bitmask
+    skip_updates: 4
+    name: "master warnings bitmask"
+    address: 9
+    register_type: holding
+    value_type: U_WORD
+    unit_of_measurement: ""
+    state_class: measurement
+    accuracy_decimals: 0
+    filters:
+      - timeout: ${live_data_timeout}
+
+  - platform: modbus_controller
+    modbus_controller_id: bms_master
+    id: master_protections_bitmask
+    skip_updates: 4
+    name: "master protections bitmask"
+    address: 10
+    register_type: holding
+    value_type: U_WORD
+    unit_of_measurement: ""
+    state_class: measurement
+    accuracy_decimals: 0
+    filters:
+      - timeout: ${live_data_timeout}
+
+  - platform: modbus_controller
+    modbus_controller_id: bms_master
+    id: master_fault_status_bitmask
+    skip_updates: 4
+    name: "master fault status bitmask"
+    address: 11
+    register_type: holding
+    value_type: U_WORD
+    unit_of_measurement: ""
+    state_class: measurement
+    accuracy_decimals: 0
+    filters:
+      - timeout: ${live_data_timeout}
+
+  - platform: modbus_controller
+    modbus_controller_id: bms_master
+    id: master_balancer_status
+    skip_updates: 4
+    name: "master balancer status"
+    address: 12
+    register_type: holding
+    value_type: U_WORD
+    unit_of_measurement: ""
+    state_class: measurement
+    accuracy_decimals: 0
+
+    filters:
+      - timeout: ${live_data_timeout}
+  # ------------------------------------------------------------
+  # MASTER PACK CELL VOLTAGE SENSORS 1-16
+  # ------------------------------------------------------------
+  # These template sensors are published by the Master delta-cell batch read.
+  # Unused/invalid cells publish NAN so Home Assistant shows them unavailable.
+
+  - platform: template
+    id: master_cell_voltage_1
+    name: "master cell voltage 1"
+    update_interval: never
+    unit_of_measurement: "V"
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 3
+    filters:
+      - delta: 0.002
+      - timeout: ${live_data_timeout}
+
+  - platform: template
+    id: master_cell_voltage_2
+    name: "master cell voltage 2"
+    update_interval: never
+    unit_of_measurement: "V"
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 3
+    filters:
+      - delta: 0.002
+      - timeout: ${live_data_timeout}
+
+  - platform: template
+    id: master_cell_voltage_3
+    name: "master cell voltage 3"
+    update_interval: never
+    unit_of_measurement: "V"
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 3
+    filters:
+      - delta: 0.002
+      - timeout: ${live_data_timeout}
+
+  - platform: template
+    id: master_cell_voltage_4
+    name: "master cell voltage 4"
+    update_interval: never
+    unit_of_measurement: "V"
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 3
+    filters:
+      - delta: 0.002
+      - timeout: ${live_data_timeout}
+
+  - platform: template
+    id: master_cell_voltage_5
+    name: "master cell voltage 5"
+    update_interval: never
+    unit_of_measurement: "V"
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 3
+    filters:
+      - delta: 0.002
+      - timeout: ${live_data_timeout}
+
+  - platform: template
+    id: master_cell_voltage_6
+    name: "master cell voltage 6"
+    update_interval: never
+    unit_of_measurement: "V"
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 3
+    filters:
+      - delta: 0.002
+      - timeout: ${live_data_timeout}
+
+  - platform: template
+    id: master_cell_voltage_7
+    name: "master cell voltage 7"
+    update_interval: never
+    unit_of_measurement: "V"
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 3
+    filters:
+      - delta: 0.002
+      - timeout: ${live_data_timeout}
+
+  - platform: template
+    id: master_cell_voltage_8
+    name: "master cell voltage 8"
+    update_interval: never
+    unit_of_measurement: "V"
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 3
+    filters:
+      - delta: 0.002
+      - timeout: ${live_data_timeout}
+
+  - platform: template
+    id: master_cell_voltage_9
+    name: "master cell voltage 9"
+    update_interval: never
+    unit_of_measurement: "V"
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 3
+    filters:
+      - delta: 0.002
+      - timeout: ${live_data_timeout}
+
+  - platform: template
+    id: master_cell_voltage_10
+    name: "master cell voltage 10"
+    update_interval: never
+    unit_of_measurement: "V"
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 3
+    filters:
+      - delta: 0.002
+      - timeout: ${live_data_timeout}
+
+  - platform: template
+    id: master_cell_voltage_11
+    name: "master cell voltage 11"
+    update_interval: never
+    unit_of_measurement: "V"
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 3
+    filters:
+      - delta: 0.002
+      - timeout: ${live_data_timeout}
+
+  - platform: template
+    id: master_cell_voltage_12
+    name: "master cell voltage 12"
+    update_interval: never
+    unit_of_measurement: "V"
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 3
+    filters:
+      - delta: 0.002
+      - timeout: ${live_data_timeout}
+
+  - platform: template
+    id: master_cell_voltage_13
+    name: "master cell voltage 13"
+    update_interval: never
+    unit_of_measurement: "V"
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 3
+    filters:
+      - delta: 0.002
+      - timeout: ${live_data_timeout}
+
+  - platform: template
+    id: master_cell_voltage_14
+    name: "master cell voltage 14"
+    update_interval: never
+    unit_of_measurement: "V"
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 3
+    filters:
+      - delta: 0.002
+      - timeout: ${live_data_timeout}
+
+  - platform: template
+    id: master_cell_voltage_15
+    name: "master cell voltage 15"
+    update_interval: never
+    unit_of_measurement: "V"
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 3
+    filters:
+      - delta: 0.002
+      - timeout: ${live_data_timeout}
+
+  - platform: template
+    id: master_cell_voltage_16
+    name: "master cell voltage 16"
+    update_interval: never
+    unit_of_measurement: "V"
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 3
+    filters:
+      - delta: 0.002
+      - timeout: ${live_data_timeout}
+
+  - platform: template
+    id: master_detected_cell_count
+    name: "master detected cell count"
+    update_interval: never
+    unit_of_measurement: "cells"
+    state_class: measurement
+    accuracy_decimals: 0
+    filters:
+      - timeout: ${live_data_timeout}
+
+  - platform: template
+    id: master_average_cell_voltage
+    name: "master average cell voltage"
+    update_interval: never
+    unit_of_measurement: "V"
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 3
+    filters:
+      - timeout: ${live_data_timeout}
+
+  - platform: template
+    id: master_min_cell_voltage
+    name: "master min cell voltage"
+    update_interval: never
+    unit_of_measurement: "V"
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 3
+    filters:
+      - timeout: ${live_data_timeout}
+
+  - platform: template
+    id: master_max_cell_voltage
+    name: "master max cell voltage"
+    update_interval: never
+    unit_of_measurement: "V"
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 3
+    filters:
+      - timeout: ${live_data_timeout}
+
+  - platform: template
+    id: master_min_voltage_cell
+    name: "master min voltage cell"
+    update_interval: never
+    unit_of_measurement: ""
+    state_class: measurement
+    accuracy_decimals: 0
+    filters:
+      - timeout: ${live_data_timeout}
+
+  - platform: template
+    id: master_max_voltage_cell
+    name: "master max voltage cell"
+    update_interval: never
+    unit_of_measurement: ""
+    state_class: measurement
+    accuracy_decimals: 0
+    filters:
+      - timeout: ${live_data_timeout}
+
+  # ------------------------------------------------------------
+  # MASTER AUTO CELL DETECTION AND CELL HEALTH CALCULATION
+  # ------------------------------------------------------------
+  # Reads registers 15-30 as possible cell voltages.
+  # Counts only realistic lithium cell values between 2.0V and 5.0V.
+  # Calculates min, max, average, delta, and detected cell count.
+
+  - platform: modbus_controller
+    modbus_controller_id: bms_master
+    id: master_delta_cell_voltage
+    name: "master delta cell voltage"
+    address: 15
+    force_new_range: true
+    register_type: holding
+    value_type: U_WORD
+    register_count: 16
+    response_size: 32
+    unit_of_measurement: "V"
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 3
+    filters:
+      - timeout: ${live_data_timeout}
+    lambda: |-
+      const uint8_t max_cells = 16;
+      if (data.size() < max_cells * 2) return NAN;
+      if (millis() < ${source_publish_delay_ms}) return NAN;
+
+      float min_cell_voltage = 100.0f;
+      float max_cell_voltage = -100.0f;
+      float total_cell_voltage = 0.0f;
+      uint8_t valid_cells = 0;
+      uint8_t min_voltage_cell = 0;
+      uint8_t max_voltage_cell = 0;
+
+      for (uint8_t i = 0; i < max_cells; i++) {
+        uint16_t raw_mv = (uint16_t)((data[i * 2] << 8) | data[(i * 2) + 1]);
+        float cell_voltage = raw_mv * 0.001f;
+
+        // Valid lithium cell range. Unused registers normally show 0V/65.535V/nonsense.
+        bool valid = cell_voltage >= 2.0f && cell_voltage <= 5.0f;
+
+        switch (i) {
+          case 0: id(master_cell_voltage_1).publish_state(valid ? cell_voltage : NAN); break;
+          case 1: id(master_cell_voltage_2).publish_state(valid ? cell_voltage : NAN); break;
+          case 2: id(master_cell_voltage_3).publish_state(valid ? cell_voltage : NAN); break;
+          case 3: id(master_cell_voltage_4).publish_state(valid ? cell_voltage : NAN); break;
+          case 4: id(master_cell_voltage_5).publish_state(valid ? cell_voltage : NAN); break;
+          case 5: id(master_cell_voltage_6).publish_state(valid ? cell_voltage : NAN); break;
+          case 6: id(master_cell_voltage_7).publish_state(valid ? cell_voltage : NAN); break;
+          case 7: id(master_cell_voltage_8).publish_state(valid ? cell_voltage : NAN); break;
+          case 8: id(master_cell_voltage_9).publish_state(valid ? cell_voltage : NAN); break;
+          case 9: id(master_cell_voltage_10).publish_state(valid ? cell_voltage : NAN); break;
+          case 10: id(master_cell_voltage_11).publish_state(valid ? cell_voltage : NAN); break;
+          case 11: id(master_cell_voltage_12).publish_state(valid ? cell_voltage : NAN); break;
+          case 12: id(master_cell_voltage_13).publish_state(valid ? cell_voltage : NAN); break;
+          case 13: id(master_cell_voltage_14).publish_state(valid ? cell_voltage : NAN); break;
+          case 14: id(master_cell_voltage_15).publish_state(valid ? cell_voltage : NAN); break;
+          case 15: id(master_cell_voltage_16).publish_state(valid ? cell_voltage : NAN); break;
+        }
+
+        if (!valid) continue;
+
+        valid_cells++;
+        total_cell_voltage += cell_voltage;
+
+        if (cell_voltage < min_cell_voltage) {
+          min_cell_voltage = cell_voltage;
+          min_voltage_cell = i + 1;
+        }
+        if (cell_voltage > max_cell_voltage) {
+          max_cell_voltage = cell_voltage;
+          max_voltage_cell = i + 1;
+        }
+      }
+
+      if (valid_cells == 0) {
+        id(master_detected_cell_count).publish_state(0);
+        id(master_average_cell_voltage).publish_state(NAN);
+        id(master_min_cell_voltage).publish_state(NAN);
+        id(master_max_cell_voltage).publish_state(NAN);
+        id(master_min_voltage_cell).publish_state(NAN);
+        id(master_max_voltage_cell).publish_state(NAN);
+        return NAN;
+      }
+
+      id(master_detected_cell_count).publish_state(valid_cells);
+      id(master_average_cell_voltage).publish_state(total_cell_voltage / valid_cells);
+      id(master_min_cell_voltage).publish_state(min_cell_voltage);
+      id(master_max_cell_voltage).publish_state(max_cell_voltage);
+      id(master_min_voltage_cell).publish_state(min_voltage_cell);
+      id(master_max_voltage_cell).publish_state(max_voltage_cell);
+
+      return max_cell_voltage - min_cell_voltage;
+
+  - platform: modbus_controller
+    modbus_controller_id: bms_master
+    id: master_battery_temperature_1
+    name: "master battery temperature 1"
+    skip_updates: 2
+    address: 31
+    register_type: holding
+    value_type: S_WORD
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 1
+    filters:
+      - multiply: 0.1
+      - lambda: |-
+          if (x < -20.0f || x > 80.0f) return {};
+          return x;
+      - timeout: ${live_data_timeout}
+  - platform: modbus_controller
+    modbus_controller_id: bms_master
+    id: master_battery_temperature_2
+    name: "master battery temperature 2"
+    skip_updates: 2
+    address: 32
+    register_type: holding
+    value_type: S_WORD
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 1
+    filters:
+      - multiply: 0.1
+      - lambda: |-
+          if (x < -20.0f || x > 80.0f) return {};
+          return x;
+      - timeout: ${live_data_timeout}
+  - platform: modbus_controller
+    modbus_controller_id: bms_master
+    id: master_battery_temperature_3
+    name: "master battery temperature 3"
+    skip_updates: 2
+    address: 33
+    register_type: holding
+    value_type: S_WORD
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 1
+    filters:
+      - multiply: 0.1
+      - lambda: |-
+          if (x < -20.0f || x > 80.0f) return {};
+          return x;
+      - timeout: ${live_data_timeout}
+  - platform: modbus_controller
+    modbus_controller_id: bms_master
+    id: master_battery_temperature_4
+    name: "master battery temperature 4"
+    skip_updates: 2
+    address: 34
+    register_type: holding
+    value_type: S_WORD
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 1
+    filters:
+      - multiply: 0.1
+      - lambda: |-
+          if (x < -20.0f || x > 80.0f) return {};
+          return x;
+      - timeout: ${live_data_timeout}
+  - platform: modbus_controller
+    modbus_controller_id: bms_master
+    id: master_mosfet_temperature
+    name: "master mosfet temperature"
+    skip_updates: 2
+    address: 35
+    register_type: holding
+    value_type: S_WORD
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 1
+    filters:
+      - multiply: 0.1
+      - lambda: |-
+          if (x < -20.0f || x > 80.0f) return {};
+          return x;
+      - timeout: ${live_data_timeout}
+  - platform: modbus_controller
+    modbus_controller_id: bms_master
+    id: master_environment_temperature
+    name: "master environment temperature"
+    skip_updates: 2
+    address: 36
+    register_type: holding
+    value_type: S_WORD
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 1
+    filters:
+      - multiply: 0.1
+      - lambda: |-
+          if (x < -20.0f || x > 80.0f) return {};
+          return x;
+      - timeout: ${live_data_timeout}
+
+  # =========================
+  # SLAVE PACK SENSOR DATA
+  # =========================
+  # ------------------------------------------------------------
+  # SLAVE PACK CORE ELECTRICAL SENSORS
+  # ------------------------------------------------------------
+  # Same logic as Master, but from Modbus address 0x02.
+
+  - platform: template
+    id: slave_current
+    name: "slave current"
+    update_interval: never
+    unit_of_measurement: "A"
+    device_class: current
+    state_class: measurement
+    accuracy_decimals: 2
+    filters:
+      - timeout: ${live_data_timeout}
+
+  - platform: template
+    id: slave_total_voltage
+    name: "slave total voltage"
+    update_interval: never
+    unit_of_measurement: "V"
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 2
+    filters:
+      - timeout: ${live_data_timeout}
+
+  - platform: modbus_controller
+    modbus_controller_id: bms_slave
+    id: slave_power
+    name: "slave power"
+    address: 0
+    force_new_range: true
+    register_type: holding
+    value_type: S_WORD
+    register_count: 2
+    response_size: 4
+    unit_of_measurement: "W"
+    device_class: power
+    state_class: measurement
+    accuracy_decimals: 1
+    filters:
+      - timeout: ${live_data_timeout}
+    lambda: |-
+      if (data.size() < 4) {
+        id(slave_current).publish_state(NAN);
+        id(slave_total_voltage).publish_state(NAN);
+        return NAN;
+      }
+
+      float current = (int16_t)((data[0] << 8) | data[1]) * 0.01f;
+      float total_voltage = (uint16_t)((data[2] << 8) | data[3]) * 0.01f;
+
+      if (current < -200.0f || current > 200.0f) {
+        ESP_LOGW("bms", "slave rejected invalid current: %.2f", current);
+        id(slave_current).publish_state(NAN);
+        id(slave_total_voltage).publish_state(NAN);
+        return NAN;
+      }
+
+      // Hubble AM2 NMC 13-cell pack expected range. Keeps bad Modbus reads out of HA.
+      if (total_voltage < 40.0f || total_voltage > 58.5f) {
+        ESP_LOGW("bms", "slave rejected invalid pack voltage: %.2f", total_voltage);
+        id(slave_current).publish_state(NAN);
+        id(slave_total_voltage).publish_state(NAN);
+        return NAN;
+      }
+
+      id(slave_current).publish_state(current);
+      id(slave_total_voltage).publish_state(total_voltage);
+
+      return current * total_voltage;
+
+  - platform: modbus_controller
+    modbus_controller_id: bms_slave
+    id: slave_state_of_charge
+    name: "slave state of charge"
+    address: 2
+    register_type: holding
+    value_type: U_WORD
+    unit_of_measurement: "%"
+    device_class: battery
+    state_class: measurement
+    accuracy_decimals: 0
+    filters:
+      - lambda: |-
+          if (x < 0.0f || x > 100.0f) return {};
+          return x;
+      - timeout: ${live_data_timeout}
+
+  - platform: modbus_controller
+    modbus_controller_id: bms_slave
+    id: slave_state_of_health
+    name: "slave state of health"
+    address: 3
+    register_type: holding
+    value_type: U_WORD
+    unit_of_measurement: "%"
+    state_class: measurement
+    accuracy_decimals: 0
+    filters:
+      - timeout: ${live_data_timeout}
+    lambda: |-
+      if (x < 0 || x > 100) return NAN;
+      return x;
+
+  - platform: modbus_controller
+    modbus_controller_id: bms_slave
+    id: slave_remaining_capacity
+    name: "slave remaining capacity"
+    address: 4
+    register_type: holding
+    value_type: U_WORD
+    unit_of_measurement: "Ah"
+    state_class: measurement
+    accuracy_decimals: 2
+    filters:
+      - multiply: 0.01
+      - lambda: |-
+          if (x < 0.0f || x > 250.0f) return {};
+          return x;
+      - timeout: ${live_data_timeout}
+  - platform: modbus_controller
+    modbus_controller_id: bms_slave
+    id: slave_full_capacity
+    name: "slave full capacity"
+    skip_updates: 14
+    address: 5
+    register_type: holding
+    value_type: U_WORD
+    unit_of_measurement: "Ah"
+    state_class: measurement
+    accuracy_decimals: 2
+    filters:
+      - multiply: 0.01
+      - lambda: |-
+          if (x < 0.0f || x > 250.0f) return {};
+          return x;
+      - timeout: ${static_data_timeout}
+  - platform: modbus_controller
+    modbus_controller_id: bms_slave
+    id: slave_design_capacity
+    name: "slave design capacity"
+    skip_updates: 14
+    address: 6
+    register_type: holding
+    value_type: U_WORD
+    unit_of_measurement: "Ah"
+    state_class: measurement
+    accuracy_decimals: 2
+    filters:
+      - multiply: 0.01
+      - lambda: |-
+          if (x < 0.0f || x > 250.0f) return {};
+          return x;
+      - timeout: ${static_data_timeout}
+  - platform: modbus_controller
+    modbus_controller_id: bms_slave
+    id: slave_charging_cycles
+    name: "slave charging cycles"
+    skip_updates: 14
+    address: 7
+    register_type: holding
+    value_type: U_WORD
+    unit_of_measurement: "cycles"
+    state_class: measurement
+    accuracy_decimals: 0
+    filters:
+      - lambda: |-
+          if (x < 0.0f || x > 20000.0f) return {};
+          return x;
+      - timeout: ${static_data_timeout}
+
+  - platform: modbus_controller
+    modbus_controller_id: bms_slave
+    id: slave_warnings_bitmask
+    skip_updates: 4
+    name: "slave warnings bitmask"
+    address: 9
+    register_type: holding
+    value_type: U_WORD
+    unit_of_measurement: ""
+    state_class: measurement
+    accuracy_decimals: 0
+    filters:
+      - timeout: ${live_data_timeout}
+
+  - platform: modbus_controller
+    modbus_controller_id: bms_slave
+    id: slave_protections_bitmask
+    skip_updates: 4
+    name: "slave protections bitmask"
+    address: 10
+    register_type: holding
+    value_type: U_WORD
+    unit_of_measurement: ""
+    state_class: measurement
+    accuracy_decimals: 0
+    filters:
+      - timeout: ${live_data_timeout}
+
+  - platform: modbus_controller
+    modbus_controller_id: bms_slave
+    id: slave_fault_status_bitmask
+    skip_updates: 4
+    name: "slave fault status bitmask"
+    address: 11
+    register_type: holding
+    value_type: U_WORD
+    unit_of_measurement: ""
+    state_class: measurement
+    accuracy_decimals: 0
+    filters:
+      - timeout: ${live_data_timeout}
+
+  - platform: modbus_controller
+    modbus_controller_id: bms_slave
+    id: slave_balancer_status
+    skip_updates: 4
+    name: "slave balancer status"
+    address: 12
+    register_type: holding
+    value_type: U_WORD
+    unit_of_measurement: ""
+    state_class: measurement
+    accuracy_decimals: 0
+
+    filters:
+      - timeout: ${live_data_timeout}
+  # ------------------------------------------------------------
+  # SLAVE PACK CELL VOLTAGE SENSORS 1-16
+  # ------------------------------------------------------------
+  # These template sensors are published by the Slave delta-cell batch read.
+
+  - platform: template
+    id: slave_cell_voltage_1
+    name: "slave cell voltage 1"
+    update_interval: never
+    unit_of_measurement: "V"
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 3
+    filters:
+      - delta: 0.002
+      - timeout: ${live_data_timeout}
+
+  - platform: template
+    id: slave_cell_voltage_2
+    name: "slave cell voltage 2"
+    update_interval: never
+    unit_of_measurement: "V"
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 3
+    filters:
+      - delta: 0.002
+      - timeout: ${live_data_timeout}
+
+  - platform: template
+    id: slave_cell_voltage_3
+    name: "slave cell voltage 3"
+    update_interval: never
+    unit_of_measurement: "V"
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 3
+    filters:
+      - delta: 0.002
+      - timeout: ${live_data_timeout}
+
+  - platform: template
+    id: slave_cell_voltage_4
+    name: "slave cell voltage 4"
+    update_interval: never
+    unit_of_measurement: "V"
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 3
+    filters:
+      - delta: 0.002
+      - timeout: ${live_data_timeout}
+
+  - platform: template
+    id: slave_cell_voltage_5
+    name: "slave cell voltage 5"
+    update_interval: never
+    unit_of_measurement: "V"
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 3
+    filters:
+      - delta: 0.002
+      - timeout: ${live_data_timeout}
+
+  - platform: template
+    id: slave_cell_voltage_6
+    name: "slave cell voltage 6"
+    update_interval: never
+    unit_of_measurement: "V"
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 3
+    filters:
+      - delta: 0.002
+      - timeout: ${live_data_timeout}
+
+  - platform: template
+    id: slave_cell_voltage_7
+    name: "slave cell voltage 7"
+    update_interval: never
+    unit_of_measurement: "V"
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 3
+    filters:
+      - delta: 0.002
+      - timeout: ${live_data_timeout}
+
+  - platform: template
+    id: slave_cell_voltage_8
+    name: "slave cell voltage 8"
+    update_interval: never
+    unit_of_measurement: "V"
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 3
+    filters:
+      - delta: 0.002
+      - timeout: ${live_data_timeout}
+
+  - platform: template
+    id: slave_cell_voltage_9
+    name: "slave cell voltage 9"
+    update_interval: never
+    unit_of_measurement: "V"
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 3
+    filters:
+      - delta: 0.002
+      - timeout: ${live_data_timeout}
+
+  - platform: template
+    id: slave_cell_voltage_10
+    name: "slave cell voltage 10"
+    update_interval: never
+    unit_of_measurement: "V"
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 3
+    filters:
+      - delta: 0.002
+      - timeout: ${live_data_timeout}
+
+  - platform: template
+    id: slave_cell_voltage_11
+    name: "slave cell voltage 11"
+    update_interval: never
+    unit_of_measurement: "V"
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 3
+    filters:
+      - delta: 0.002
+      - timeout: ${live_data_timeout}
+
+  - platform: template
+    id: slave_cell_voltage_12
+    name: "slave cell voltage 12"
+    update_interval: never
+    unit_of_measurement: "V"
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 3
+    filters:
+      - delta: 0.002
+      - timeout: ${live_data_timeout}
+
+  - platform: template
+    id: slave_cell_voltage_13
+    name: "slave cell voltage 13"
+    update_interval: never
+    unit_of_measurement: "V"
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 3
+    filters:
+      - delta: 0.002
+      - timeout: ${live_data_timeout}
+
+  - platform: template
+    id: slave_cell_voltage_14
+    name: "slave cell voltage 14"
+    update_interval: never
+    unit_of_measurement: "V"
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 3
+    filters:
+      - delta: 0.002
+      - timeout: ${live_data_timeout}
+
+  - platform: template
+    id: slave_cell_voltage_15
+    name: "slave cell voltage 15"
+    update_interval: never
+    unit_of_measurement: "V"
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 3
+    filters:
+      - delta: 0.002
+      - timeout: ${live_data_timeout}
+
+  - platform: template
+    id: slave_cell_voltage_16
+    name: "slave cell voltage 16"
+    update_interval: never
+    unit_of_measurement: "V"
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 3
+    filters:
+      - delta: 0.002
+      - timeout: ${live_data_timeout}
+
+  - platform: template
+    id: slave_detected_cell_count
+    name: "slave detected cell count"
+    update_interval: never
+    unit_of_measurement: "cells"
+    state_class: measurement
+    accuracy_decimals: 0
+    filters:
+      - timeout: ${live_data_timeout}
+
+  - platform: template
+    id: slave_average_cell_voltage
+    name: "slave average cell voltage"
+    update_interval: never
+    unit_of_measurement: "V"
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 3
+    filters:
+      - timeout: ${live_data_timeout}
+
+  - platform: template
+    id: slave_min_cell_voltage
+    name: "slave min cell voltage"
+    update_interval: never
+    unit_of_measurement: "V"
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 3
+    filters:
+      - timeout: ${live_data_timeout}
+
+  - platform: template
+    id: slave_max_cell_voltage
+    name: "slave max cell voltage"
+    update_interval: never
+    unit_of_measurement: "V"
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 3
+    filters:
+      - timeout: ${live_data_timeout}
+
+  - platform: template
+    id: slave_min_voltage_cell
+    name: "slave min voltage cell"
+    update_interval: never
+    unit_of_measurement: ""
+    state_class: measurement
+    accuracy_decimals: 0
+    filters:
+      - timeout: ${live_data_timeout}
+
+  - platform: template
+    id: slave_max_voltage_cell
+    name: "slave max voltage cell"
+    update_interval: never
+    unit_of_measurement: ""
+    state_class: measurement
+    accuracy_decimals: 0
+    filters:
+      - timeout: ${live_data_timeout}
+
+  # ------------------------------------------------------------
+  # SLAVE AUTO CELL DETECTION AND CELL HEALTH CALCULATION
+  # ------------------------------------------------------------
+  # Reads up to 16 possible cells and ignores unused/invalid registers.
+
+  - platform: modbus_controller
+    modbus_controller_id: bms_slave
+    id: slave_delta_cell_voltage
+    name: "slave delta cell voltage"
+    address: 15
+    force_new_range: true
+    register_type: holding
+    value_type: U_WORD
+    register_count: 16
+    response_size: 32
+    unit_of_measurement: "V"
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 3
+    filters:
+      - timeout: ${live_data_timeout}
+    lambda: |-
+      const uint8_t max_cells = 16;
+      if (data.size() < max_cells * 2) return NAN;
+      if (millis() < ${source_publish_delay_ms}) return NAN;
+
+      float min_cell_voltage = 100.0f;
+      float max_cell_voltage = -100.0f;
+      float total_cell_voltage = 0.0f;
+      uint8_t valid_cells = 0;
+      uint8_t min_voltage_cell = 0;
+      uint8_t max_voltage_cell = 0;
+
+      for (uint8_t i = 0; i < max_cells; i++) {
+        uint16_t raw_mv = (uint16_t)((data[i * 2] << 8) | data[(i * 2) + 1]);
+        float cell_voltage = raw_mv * 0.001f;
+
+        // Valid lithium cell range. Unused registers normally show 0V/65.535V/nonsense.
+        bool valid = cell_voltage >= 2.0f && cell_voltage <= 5.0f;
+
+        switch (i) {
+          case 0: id(slave_cell_voltage_1).publish_state(valid ? cell_voltage : NAN); break;
+          case 1: id(slave_cell_voltage_2).publish_state(valid ? cell_voltage : NAN); break;
+          case 2: id(slave_cell_voltage_3).publish_state(valid ? cell_voltage : NAN); break;
+          case 3: id(slave_cell_voltage_4).publish_state(valid ? cell_voltage : NAN); break;
+          case 4: id(slave_cell_voltage_5).publish_state(valid ? cell_voltage : NAN); break;
+          case 5: id(slave_cell_voltage_6).publish_state(valid ? cell_voltage : NAN); break;
+          case 6: id(slave_cell_voltage_7).publish_state(valid ? cell_voltage : NAN); break;
+          case 7: id(slave_cell_voltage_8).publish_state(valid ? cell_voltage : NAN); break;
+          case 8: id(slave_cell_voltage_9).publish_state(valid ? cell_voltage : NAN); break;
+          case 9: id(slave_cell_voltage_10).publish_state(valid ? cell_voltage : NAN); break;
+          case 10: id(slave_cell_voltage_11).publish_state(valid ? cell_voltage : NAN); break;
+          case 11: id(slave_cell_voltage_12).publish_state(valid ? cell_voltage : NAN); break;
+          case 12: id(slave_cell_voltage_13).publish_state(valid ? cell_voltage : NAN); break;
+          case 13: id(slave_cell_voltage_14).publish_state(valid ? cell_voltage : NAN); break;
+          case 14: id(slave_cell_voltage_15).publish_state(valid ? cell_voltage : NAN); break;
+          case 15: id(slave_cell_voltage_16).publish_state(valid ? cell_voltage : NAN); break;
+        }
+
+        if (!valid) continue;
+
+        valid_cells++;
+        total_cell_voltage += cell_voltage;
+
+        if (cell_voltage < min_cell_voltage) {
+          min_cell_voltage = cell_voltage;
+          min_voltage_cell = i + 1;
+        }
+        if (cell_voltage > max_cell_voltage) {
+          max_cell_voltage = cell_voltage;
+          max_voltage_cell = i + 1;
+        }
+      }
+
+      if (valid_cells == 0) {
+        id(slave_detected_cell_count).publish_state(0);
+        id(slave_average_cell_voltage).publish_state(NAN);
+        id(slave_min_cell_voltage).publish_state(NAN);
+        id(slave_max_cell_voltage).publish_state(NAN);
+        id(slave_min_voltage_cell).publish_state(NAN);
+        id(slave_max_voltage_cell).publish_state(NAN);
+        return NAN;
+      }
+
+      id(slave_detected_cell_count).publish_state(valid_cells);
+      id(slave_average_cell_voltage).publish_state(total_cell_voltage / valid_cells);
+      id(slave_min_cell_voltage).publish_state(min_cell_voltage);
+      id(slave_max_cell_voltage).publish_state(max_cell_voltage);
+      id(slave_min_voltage_cell).publish_state(min_voltage_cell);
+      id(slave_max_voltage_cell).publish_state(max_voltage_cell);
+
+      return max_cell_voltage - min_cell_voltage;
+
+  - platform: modbus_controller
+    modbus_controller_id: bms_slave
+    id: slave_battery_temperature_1
+    name: "slave battery temperature 1"
+    skip_updates: 2
+    address: 31
+    register_type: holding
+    value_type: S_WORD
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 1
+    filters:
+      - multiply: 0.1
+      - lambda: |-
+          if (x < -20.0f || x > 80.0f) return {};
+          return x;
+      - timeout: ${live_data_timeout}
+  - platform: modbus_controller
+    modbus_controller_id: bms_slave
+    id: slave_battery_temperature_2
+    name: "slave battery temperature 2"
+    skip_updates: 2
+    address: 32
+    register_type: holding
+    value_type: S_WORD
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 1
+    filters:
+      - multiply: 0.1
+      - lambda: |-
+          if (x < -20.0f || x > 80.0f) return {};
+          return x;
+      - timeout: ${live_data_timeout}
+  - platform: modbus_controller
+    modbus_controller_id: bms_slave
+    id: slave_battery_temperature_3
+    name: "slave battery temperature 3"
+    skip_updates: 2
+    address: 33
+    register_type: holding
+    value_type: S_WORD
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 1
+    filters:
+      - multiply: 0.1
+      - lambda: |-
+          if (x < -20.0f || x > 80.0f) return {};
+          return x;
+      - timeout: ${live_data_timeout}
+  - platform: modbus_controller
+    modbus_controller_id: bms_slave
+    id: slave_battery_temperature_4
+    name: "slave battery temperature 4"
+    skip_updates: 2
+    address: 34
+    register_type: holding
+    value_type: S_WORD
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 1
+    filters:
+      - multiply: 0.1
+      - lambda: |-
+          if (x < -20.0f || x > 80.0f) return {};
+          return x;
+      - timeout: ${live_data_timeout}
+  - platform: modbus_controller
+    modbus_controller_id: bms_slave
+    id: slave_mosfet_temperature
+    name: "slave mosfet temperature"
+    skip_updates: 2
+    address: 35
+    register_type: holding
+    value_type: S_WORD
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 1
+    filters:
+      - multiply: 0.1
+      - lambda: |-
+          if (x < -20.0f || x > 80.0f) return {};
+          return x;
+      - timeout: ${live_data_timeout}
+  - platform: modbus_controller
+    modbus_controller_id: bms_slave
+    id: slave_environment_temperature
+    name: "slave environment temperature"
+    skip_updates: 2
+    address: 36
+    register_type: holding
+    value_type: S_WORD
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 1
+    filters:
+      - multiply: 0.1
+      - lambda: |-
+          if (x < -20.0f || x > 80.0f) return {};
+          return x;
+      - timeout: ${live_data_timeout}
+
+  # ------------------------------------------------------------
+  # COMBINED BATTERY CALCULATION NOTES
+  # ------------------------------------------------------------
+  # Intended for parallel-connected packs.
+  # Adds current, power and capacities.
+  # Does NOT add voltages; combined pack voltage is averaged.
+
+  # =========================
+  # COMBINED BATTERY SENSOR DATA
+  # =========================
+  - platform: template
+    id: combined_total_detected_cell_count
+    name: "combined total detected cell count"
+    unit_of_measurement: "cells"
+    state_class: measurement
+    accuracy_decimals: 0
+    update_interval: ${combined_update_interval}
+    filters:
+      - timeout: ${live_data_timeout}
+    lambda: |-
+      if (millis() < ${startup_publish_delay_ms}) return {};
+      float m = id(master_detected_cell_count).state;
+      float s = id(slave_detected_cell_count).state;
+
+      // Combined cell count must represent BOTH packs.
+      // If either pack is stale/unavailable, publish NAN instead of a partial total.
+      if (isnan(m) || isnan(s) || m <= 0 || s <= 0) return NAN;
+
+      return m + s;
+
+  - platform: template
+    id: combined_total_current
+    name: "combined total current"
+    unit_of_measurement: "A"
+    device_class: current
+    state_class: measurement
+    accuracy_decimals: 2
+    update_interval: ${combined_update_interval}
+    filters:
+      - timeout: ${live_data_timeout}
+    lambda: |-
+      if (millis() < ${startup_publish_delay_ms}) return {};
+      float m = id(master_current).state;
+      float s = id(slave_current).state;
+
+      // Combined current must be the actual total of BOTH packs.
+      // If either pack is stale/unavailable, do not show a partial value.
+      if (isnan(m) || isnan(s)) return NAN;
+
+      return m + s;
+
+  - platform: template
+    id: combined_total_power
+    name: "combined total power"
+    unit_of_measurement: "W"
+    device_class: power
+    state_class: measurement
+    accuracy_decimals: 1
+    update_interval: ${combined_update_interval}
+    filters:
+      - timeout: ${live_data_timeout}
+    lambda: |-
+      if (millis() < ${startup_publish_delay_ms}) return {};
+      float m = id(master_power).state;
+      float s = id(slave_power).state;
+
+      // Combined power must be the actual total of BOTH packs.
+      if (isnan(m) || isnan(s)) return NAN;
+
+      return m + s;
+
+  - platform: template
+    id: combined_average_pack_voltage
+    name: "combined average pack voltage"
+    unit_of_measurement: "V"
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 2
+    update_interval: ${combined_update_interval}
+    filters:
+      - timeout: ${live_data_timeout}
+    lambda: |-
+      if (millis() < ${startup_publish_delay_ms}) return {};
+      float m = id(master_total_voltage).state;
+      float s = id(slave_total_voltage).state;
+
+      // Parallel packs: voltage is averaged, not added.
+      // Require BOTH pack voltages so the displayed value is not hiding a failed pack.
+      if (isnan(m) || isnan(s)) return NAN;
+
+      return (m + s) / 2.0f;
+
+  - platform: template
+    id: combined_total_remaining_capacity
+    name: "combined total remaining capacity"
+    unit_of_measurement: "Ah"
+    state_class: measurement
+    accuracy_decimals: 2
+    update_interval: ${combined_update_interval}
+    filters:
+      - timeout: ${live_data_timeout}
+    lambda: |-
+      if (millis() < ${startup_publish_delay_ms}) return {};
+      float m = id(master_remaining_capacity).state;
+      float s = id(slave_remaining_capacity).state;
+
+      // Capacity total must include BOTH packs.
+      if (isnan(m) || isnan(s)) return NAN;
+
+      return m + s;
+
+  - platform: template
+    id: combined_total_full_capacity
+    name: "combined total full capacity"
+    unit_of_measurement: "Ah"
+    state_class: measurement
+    accuracy_decimals: 2
+    update_interval: ${combined_update_interval}
+    filters:
+      - timeout: ${static_data_timeout}
+    lambda: |-
+      if (millis() < ${startup_publish_delay_ms}) return {};
+      float m = id(master_full_capacity).state;
+      float s = id(slave_full_capacity).state;
+
+      // Full-capacity total must include BOTH packs.
+      if (isnan(m) || isnan(s)) return NAN;
+
+      return m + s;
+
+  - platform: template
+    id: combined_total_design_capacity
+    name: "combined total design capacity"
+    unit_of_measurement: "Ah"
+    state_class: measurement
+    accuracy_decimals: 2
+    update_interval: ${combined_update_interval}
+    filters:
+      - timeout: ${static_data_timeout}
+    lambda: |-
+      if (millis() < ${startup_publish_delay_ms}) return {};
+      float m = id(master_design_capacity).state;
+      float s = id(slave_design_capacity).state;
+
+      // Design-capacity total must include BOTH packs.
+      if (isnan(m) || isnan(s)) return NAN;
+
+      return m + s;
+
+  - platform: template
+    id: combined_state_of_charge
+    name: "combined state of charge"
+    unit_of_measurement: "%"
+    device_class: battery
+    state_class: measurement
+    accuracy_decimals: 0
+    update_interval: ${combined_update_interval}
+    filters:
+      - timeout: ${live_data_timeout}
+    lambda: |-
+      if (millis() < ${startup_publish_delay_ms}) return {};
+      float remaining = id(combined_total_remaining_capacity).state;
+      float full = id(combined_total_full_capacity).state;
+      if (isnan(remaining) || isnan(full) || full <= 0) return NAN;
+      float soc = (remaining / full) * 100.0f;
+      if (soc < 0.0f || soc > 100.0f) return NAN;
+      return soc;
+
+  - platform: template
+    id: combined_state_of_health
+    name: "combined state of health"
+    unit_of_measurement: "%"
+    state_class: measurement
+    accuracy_decimals: 0
+    update_interval: ${combined_update_interval}
+    filters:
+      - timeout: ${live_data_timeout}
+    lambda: |-
+      if (millis() < ${startup_publish_delay_ms}) return {};
+      float full = id(combined_total_full_capacity).state;
+      float design = id(combined_total_design_capacity).state;
+      if (isnan(full) || isnan(design) || design <= 0) return NAN;
+      float soh = (full / design) * 100.0f;
+      if (soh < 0 || soh > 100) return NAN;
+      return soh;
+
+  - platform: template
+    id: combined_average_cell_voltage
+    name: "combined average cell voltage"
+    unit_of_measurement: "V"
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 3
+    update_interval: ${combined_update_interval}
+    filters:
+      - timeout: ${live_data_timeout}
+    lambda: |-
+      if (millis() < ${startup_publish_delay_ms}) return {};
+      float mc = id(master_detected_cell_count).state;
+      float sc = id(slave_detected_cell_count).state;
+      float ma = id(master_average_cell_voltage).state;
+      float sa = id(slave_average_cell_voltage).state;
+
+      // Weighted average across BOTH packs only.
+      // If either pack is stale/unavailable, publish NAN.
+      if (isnan(mc) || isnan(sc) || isnan(ma) || isnan(sa) || mc <= 0 || sc <= 0) return NAN;
+
+      return ((ma * mc) + (sa * sc)) / (mc + sc);
+
+  - platform: template
+    id: combined_lowest_cell_voltage
+    name: "combined lowest cell voltage"
+    unit_of_measurement: "V"
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 3
+    update_interval: ${combined_update_interval}
+    filters:
+      - timeout: ${live_data_timeout}
+    lambda: |-
+      if (millis() < ${startup_publish_delay_ms}) return {};
+      float m = id(master_min_cell_voltage).state;
+      float s = id(slave_min_cell_voltage).state;
+
+      // Require BOTH packs so a failed pack does not disappear from the combined health view.
+      if (isnan(m) || isnan(s)) return NAN;
+
+      return fminf(m, s);
+
+  - platform: template
+    id: combined_highest_cell_voltage
+    name: "combined highest cell voltage"
+    unit_of_measurement: "V"
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 3
+    update_interval: ${combined_update_interval}
+    filters:
+      - timeout: ${live_data_timeout}
+    lambda: |-
+      if (millis() < ${startup_publish_delay_ms}) return {};
+      float m = id(master_max_cell_voltage).state;
+      float s = id(slave_max_cell_voltage).state;
+
+      // Require BOTH packs so a failed pack does not disappear from the combined health view.
+      if (isnan(m) || isnan(s)) return NAN;
+
+      return fmaxf(m, s);
+
+  - platform: template
+    id: combined_worst_delta_cell_voltage
+    name: "combined worst delta cell voltage"
+    unit_of_measurement: "V"
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 3
+    update_interval: ${combined_update_interval}
+    filters:
+      - timeout: ${live_data_timeout}
+    lambda: |-
+      if (millis() < ${startup_publish_delay_ms}) return {};
+      float m = id(master_delta_cell_voltage).state;
+      float s = id(slave_delta_cell_voltage).state;
+
+      // Require BOTH packs so the worst-delta value is a true combined health metric.
+      if (isnan(m) || isnan(s)) return NAN;
+
+      return fmaxf(m, s);
+
+  # ------------------------------------------------------------
+  # ESP32 DIAGNOSTIC SENSORS
+  # ------------------------------------------------------------
+  # Helps verify Wi-Fi strength and device uptime.
+
+  - platform: wifi_signal
+    name: "wifi signal"
+    update_interval: 60s
+    entity_category: diagnostic
+
+  - platform: uptime
+    id: device_uptime
+    name: "uptime"
+    update_interval: 60s
+    entity_category: diagnostic
+
+# ============================================================
+# TEXT SENSORS
+# ============================================================
+# Converts raw bitmask registers into readable warning/protection/fault/status
+# text, and exposes BMS/version/serial information.
+
+  # =========================
+  # PROJECTED RUNTIME / CHARGING TIME
+  # =========================
+  # Positive current = charging on this PACE/Hubble map.
+  # Negative current = discharging.
+  #
+  # These estimates intentionally return NAN when they are not applicable
+  # or when source data is unavailable. This keeps the dashboard honest:
+  # no stale/fake runtime or charge-time values are shown.
+  #
+  # Runtime while discharging:
+  #   remaining capacity Ah / absolute discharge current A = hours
+  #   hours * 60 = minutes shown on dashboard
+  #
+  # Charging time while charging:
+  #   (full capacity Ah - remaining capacity Ah) / charge current A = hours
+  #   hours * 60 = minutes shown on dashboard
+  #
+  # The 1A threshold avoids nonsense values when the battery is near idle.
+  # Values are published in minutes so Home Assistant does not round
+  # sub-1-hour estimates down to 0 h on dashboard cards.
+
+  - platform: template
+    id: master_projected_runtime
+    name: "master projected runtime"
+    unit_of_measurement: "min"
+    device_class: duration
+    state_class: measurement
+    accuracy_decimals: 0
+    update_interval: ${combined_update_interval}
+    filters:
+      - timeout: ${live_data_timeout}
+    lambda: |-
+      if (millis() < ${startup_publish_delay_ms}) return {};
+      float current = id(master_current).state;
+      float remaining = id(master_remaining_capacity).state;
+
+      if (isnan(current) || isnan(remaining)) return NAN;
+
+      // Runtime only applies when discharging.
+      if (current >= -1.0f) return NAN;
+
+      return (remaining / fabs(current)) * 60.0f;
+
+  - platform: template
+    id: master_projected_charging_time
+    name: "master projected charging time"
+    unit_of_measurement: "min"
+    device_class: duration
+    state_class: measurement
+    accuracy_decimals: 0
+    update_interval: ${combined_update_interval}
+    filters:
+      - timeout: ${live_data_timeout}
+    lambda: |-
+      if (millis() < ${startup_publish_delay_ms}) return {};
+      float current = id(master_current).state;
+      float remaining = id(master_remaining_capacity).state;
+      float full = id(master_full_capacity).state;
+
+      if (isnan(current) || isnan(remaining) || isnan(full)) return NAN;
+
+      // Charging time only applies when charging.
+      if (current <= 1.0f) return NAN;
+
+      float capacity_needed = full - remaining;
+      if (capacity_needed <= 0.0f) return 0.0f;
+
+      return (capacity_needed / current) * 60.0f;
+
+  - platform: template
+    id: slave_projected_runtime
+    name: "slave projected runtime"
+    unit_of_measurement: "min"
+    device_class: duration
+    state_class: measurement
+    accuracy_decimals: 0
+    update_interval: ${combined_update_interval}
+    filters:
+      - timeout: ${live_data_timeout}
+    lambda: |-
+      if (millis() < ${startup_publish_delay_ms}) return {};
+      float current = id(slave_current).state;
+      float remaining = id(slave_remaining_capacity).state;
+
+      if (isnan(current) || isnan(remaining)) return NAN;
+
+      // Runtime only applies when discharging.
+      if (current >= -1.0f) return NAN;
+
+      return (remaining / fabs(current)) * 60.0f;
+
+  - platform: template
+    id: slave_projected_charging_time
+    name: "slave projected charging time"
+    unit_of_measurement: "min"
+    device_class: duration
+    state_class: measurement
+    accuracy_decimals: 0
+    update_interval: ${combined_update_interval}
+    filters:
+      - timeout: ${live_data_timeout}
+    lambda: |-
+      if (millis() < ${startup_publish_delay_ms}) return {};
+      float current = id(slave_current).state;
+      float remaining = id(slave_remaining_capacity).state;
+      float full = id(slave_full_capacity).state;
+
+      if (isnan(current) || isnan(remaining) || isnan(full)) return NAN;
+
+      // Charging time only applies when charging.
+      if (current <= 1.0f) return NAN;
+
+      float capacity_needed = full - remaining;
+      if (capacity_needed <= 0.0f) return 0.0f;
+
+      return (capacity_needed / current) * 60.0f;
+
+  - platform: template
+    id: combined_projected_runtime
+    name: "combined projected runtime"
+    unit_of_measurement: "min"
+    device_class: duration
+    state_class: measurement
+    accuracy_decimals: 0
+    update_interval: ${combined_update_interval}
+    filters:
+      - timeout: ${live_data_timeout}
+    lambda: |-
+      if (millis() < ${startup_publish_delay_ms}) return {};
+      float current = id(combined_total_current).state;
+      float remaining = id(combined_total_remaining_capacity).state;
+
+      if (isnan(current) || isnan(remaining)) return NAN;
+
+      // Runtime only applies when the combined bank is discharging.
+      if (current >= -1.0f) return NAN;
+
+      return (remaining / fabs(current)) * 60.0f;
+
+  - platform: template
+    id: combined_projected_charging_time
+    name: "combined projected charging time"
+    unit_of_measurement: "min"
+    device_class: duration
+    state_class: measurement
+    accuracy_decimals: 0
+    update_interval: ${combined_update_interval}
+    filters:
+      - timeout: ${live_data_timeout}
+    lambda: |-
+      if (millis() < ${startup_publish_delay_ms}) return {};
+      float current = id(combined_total_current).state;
+      float remaining = id(combined_total_remaining_capacity).state;
+      float full = id(combined_total_full_capacity).state;
+
+      if (isnan(current) || isnan(remaining) || isnan(full)) return NAN;
+
+      // Charging time only applies when the combined bank is charging.
+      if (current <= 1.0f) return NAN;
+
+      float capacity_needed = full - remaining;
+      if (capacity_needed <= 0.0f) return 0.0f;
+
+      return (capacity_needed / current) * 60.0f;
+
+
+text_sensor:
+
+  # =========================
+  # FORMATTED RUNTIME / CHARGING TIME TEXT
+  # =========================
+  #
+  # Numeric projected time sensors remain in minutes for accuracy/history.
+  # These text sensors are for dashboard display only.
+  #
+  # Example:
+  #   511 min -> 8h 31m
+  #
+  # =========================
+
+  - platform: template
+    id: combined_projected_runtime_text
+    name: "combined projected runtime text"
+    update_interval: ${combined_update_interval}
+    lambda: |-
+      if (millis() < ${startup_publish_delay_ms}) return {};
+      float minutes = id(combined_projected_runtime).state;
+
+      if (isnan(minutes)) {
+        return std::string("Unavailable");
+      }
+
+      int total_minutes = (int) roundf(minutes);
+
+      if (total_minutes <= 0) {
+        return std::string("0 min");
+      }
+
+      int hours = total_minutes / 60;
+      int mins = total_minutes % 60;
+
+      if (hours > 0 && mins > 0) {
+        char buffer[32];
+        snprintf(buffer, sizeof(buffer), "%dh %02dm", hours, mins);
+        return std::string(buffer);
+      }
+
+      if (hours > 0) {
+        char buffer[32];
+        snprintf(buffer, sizeof(buffer), "%dh", hours);
+        return std::string(buffer);
+      }
+
+      char buffer[32];
+      snprintf(buffer, sizeof(buffer), "%d min", mins);
+      return std::string(buffer);
+
+  - platform: template
+    id: combined_projected_charging_time_text
+    name: "combined projected charging time text"
+    update_interval: ${combined_update_interval}
+    lambda: |-
+      if (millis() < ${startup_publish_delay_ms}) return {};
+      float minutes = id(combined_projected_charging_time).state;
+
+      if (isnan(minutes)) {
+        return std::string("Unavailable");
+      }
+
+      int total_minutes = (int) roundf(minutes);
+
+      if (total_minutes <= 0) {
+        return std::string("0 min");
+      }
+
+      int hours = total_minutes / 60;
+      int mins = total_minutes % 60;
+
+      if (hours > 0 && mins > 0) {
+        char buffer[32];
+        snprintf(buffer, sizeof(buffer), "%dh %02dm", hours, mins);
+        return std::string(buffer);
+      }
+
+      if (hours > 0) {
+        char buffer[32];
+        snprintf(buffer, sizeof(buffer), "%dh", hours);
+        return std::string(buffer);
+      }
+
+      char buffer[32];
+      snprintf(buffer, sizeof(buffer), "%d min", mins);
+      return std::string(buffer);
+
+  - platform: template
+    id: master_projected_runtime_text
+    name: "master projected runtime text"
+    update_interval: ${combined_update_interval}
+    lambda: |-
+      if (millis() < ${startup_publish_delay_ms}) return {};
+      float minutes = id(master_projected_runtime).state;
+
+      if (isnan(minutes)) {
+        return std::string("Unavailable");
+      }
+
+      int total_minutes = (int) roundf(minutes);
+
+      if (total_minutes <= 0) {
+        return std::string("0 min");
+      }
+
+      int hours = total_minutes / 60;
+      int mins = total_minutes % 60;
+
+      if (hours > 0 && mins > 0) {
+        char buffer[32];
+        snprintf(buffer, sizeof(buffer), "%dh %02dm", hours, mins);
+        return std::string(buffer);
+      }
+
+      if (hours > 0) {
+        char buffer[32];
+        snprintf(buffer, sizeof(buffer), "%dh", hours);
+        return std::string(buffer);
+      }
+
+      char buffer[32];
+      snprintf(buffer, sizeof(buffer), "%d min", mins);
+      return std::string(buffer);
+
+  - platform: template
+    id: master_projected_charging_time_text
+    name: "master projected charging time text"
+    update_interval: ${combined_update_interval}
+    lambda: |-
+      if (millis() < ${startup_publish_delay_ms}) return {};
+      float minutes = id(master_projected_charging_time).state;
+
+      if (isnan(minutes)) {
+        return std::string("Unavailable");
+      }
+
+      int total_minutes = (int) roundf(minutes);
+
+      if (total_minutes <= 0) {
+        return std::string("0 min");
+      }
+
+      int hours = total_minutes / 60;
+      int mins = total_minutes % 60;
+
+      if (hours > 0 && mins > 0) {
+        char buffer[32];
+        snprintf(buffer, sizeof(buffer), "%dh %02dm", hours, mins);
+        return std::string(buffer);
+      }
+
+      if (hours > 0) {
+        char buffer[32];
+        snprintf(buffer, sizeof(buffer), "%dh", hours);
+        return std::string(buffer);
+      }
+
+      char buffer[32];
+      snprintf(buffer, sizeof(buffer), "%d min", mins);
+      return std::string(buffer);
+
+  - platform: template
+    id: slave_projected_runtime_text
+    name: "slave projected runtime text"
+    update_interval: ${combined_update_interval}
+    lambda: |-
+      if (millis() < ${startup_publish_delay_ms}) return {};
+      float minutes = id(slave_projected_runtime).state;
+
+      if (isnan(minutes)) {
+        return std::string("Unavailable");
+      }
+
+      int total_minutes = (int) roundf(minutes);
+
+      if (total_minutes <= 0) {
+        return std::string("0 min");
+      }
+
+      int hours = total_minutes / 60;
+      int mins = total_minutes % 60;
+
+      if (hours > 0 && mins > 0) {
+        char buffer[32];
+        snprintf(buffer, sizeof(buffer), "%dh %02dm", hours, mins);
+        return std::string(buffer);
+      }
+
+      if (hours > 0) {
+        char buffer[32];
+        snprintf(buffer, sizeof(buffer), "%dh", hours);
+        return std::string(buffer);
+      }
+
+      char buffer[32];
+      snprintf(buffer, sizeof(buffer), "%d min", mins);
+      return std::string(buffer);
+
+  - platform: template
+    id: slave_projected_charging_time_text
+    name: "slave projected charging time text"
+    update_interval: ${combined_update_interval}
+    lambda: |-
+      if (millis() < ${startup_publish_delay_ms}) return {};
+      float minutes = id(slave_projected_charging_time).state;
+
+      if (isnan(minutes)) {
+        return std::string("Unavailable");
+      }
+
+      int total_minutes = (int) roundf(minutes);
+
+      if (total_minutes <= 0) {
+        return std::string("0 min");
+      }
+
+      int hours = total_minutes / 60;
+      int mins = total_minutes % 60;
+
+      if (hours > 0 && mins > 0) {
+        char buffer[32];
+        snprintf(buffer, sizeof(buffer), "%dh %02dm", hours, mins);
+        return std::string(buffer);
+      }
+
+      if (hours > 0) {
+        char buffer[32];
+        snprintf(buffer, sizeof(buffer), "%dh", hours);
+        return std::string(buffer);
+      }
+
+      char buffer[32];
+      snprintf(buffer, sizeof(buffer), "%d min", mins);
+      return std::string(buffer);
+
+  # ------------------------------------------------------------
+  # MASTER PACK READABLE BITMASK DECODERS
+  # ------------------------------------------------------------
+  # Converts raw warning/protection/fault/status bits into readable text.
+
+  - platform: modbus_controller
+    modbus_controller_id: bms_master
+    name: "master warnings"
+    skip_updates: 4
+    address: 9
+    register_type: holding
+    register_count: 1
+    response_size: 2
+    raw_encode: HEXBYTES
+    lambda: |-
+      static const uint8_t FLAGS_SIZE = 16;
+      static const char *const FLAGS[FLAGS_SIZE] = {
+          "Cell overvoltage",
+          "Cell undervoltage",
+          "Pack overvoltage",
+          "Pack undervoltage",
+          "Charging overcurrent",
+          "Discharging overcurrent",
+          "Reserve (Bit 7)",
+          "Reserve (Bit 8)",
+          "Charging overtemperature",
+          "Discharging overtemperature",
+          "Charging undertemperature",
+          "Discharging undertemperature",
+          "Environment overtemperature",
+          "Environment undertemperature",
+          "MOSFET overtemperature",
+          "Low state of charge"
+      };
+      std::string values = "";
+      uint16_t mask = modbus::helpers::word_from_hex_str(x, 0);
+      if (mask) {
+        for (int i = 0; i < FLAGS_SIZE + 0; i++) {
+          if (mask & (1 << i)) {
+            values.append(FLAGS[i - 0]);
+            values.append(";");
+          }
+        }
+        if (!values.empty()) values.pop_back();
+      }
+      return values;
+
+  - platform: modbus_controller
+    modbus_controller_id: bms_master
+    name: "master protections"
+    skip_updates: 4
+    address: 10
+    register_type: holding
+    register_count: 1
+    response_size: 2
+    raw_encode: HEXBYTES
+    lambda: |-
+      static const uint8_t FLAGS_SIZE = 16;
+      static const char *const FLAGS[FLAGS_SIZE] = {
+          "Cell overvoltage",
+          "Cell undervoltage",
+          "Pack overvoltage",
+          "Pack undervoltage",
+          "Charging overcurrent",
+          "Discharging overcurrent",
+          "Short circuit",
+          "Charging overvoltage",
+          "Charging overtemperature",
+          "Discharging overtemperature",
+          "Charging undertemperature",
+          "Discharging undertemperature",
+          "MOSFET overtemperature",
+          "Environment overtemperature",
+          "Environment undertemperature",
+          "Battery Full"
+      };
+      std::string values = "";
+      uint16_t mask = modbus::helpers::word_from_hex_str(x, 0);
+      if (mask) {
+        for (int i = 0; i < FLAGS_SIZE + 0; i++) {
+          if (mask & (1 << i)) {
+            values.append(FLAGS[i - 0]);
+            values.append(";");
+          }
+        }
+        if (!values.empty()) values.pop_back();
+      }
+      return values;
+
+  - platform: modbus_controller
+    modbus_controller_id: bms_master
+    name: "master faults"
+    skip_updates: 4
+    address: 11
+    register_type: holding
+    register_count: 1
+    response_size: 2
+    raw_encode: HEXBYTES
+    lambda: |-
+      static const uint8_t FLAGS_SIZE = 8;
+      static const char *const FLAGS[FLAGS_SIZE] = {
+          "Charging MOSFET fault",
+          "Discharging MOSFET fault",
+          "Temperature sensor",
+          "Reserve (Bit 4)",
+          "Battery cell fault",
+          "Front end sampling communication fault",
+          "Reserve (Bit 7)",
+          "Reserve (Bit 8)"
+      };
+      std::string values = "";
+      uint16_t mask = modbus::helpers::word_from_hex_str(x, 0);
+      if (mask) {
+        for (int i = 0; i < FLAGS_SIZE + 0; i++) {
+          if (mask & (1 << i)) {
+            values.append(FLAGS[i - 0]);
+            values.append(";");
+          }
+        }
+        if (!values.empty()) values.pop_back();
+      }
+      return values;
+
+  - platform: modbus_controller
+    modbus_controller_id: bms_master
+    name: "master status"
+    skip_updates: 4
+    address: 11
+    register_type: holding
+    register_count: 1
+    response_size: 2
+    raw_encode: HEXBYTES
+    lambda: |-
+      static const uint8_t FLAGS_SIZE = 8;
+      static const char *const FLAGS[FLAGS_SIZE] = {
+          "CHG",
+          "DCHG",
+          "MOSFET_CHG",
+          "MOSFET_DCHG",
+          "LIMIT_CHG",
+          "Reserve (Bit 13)",
+          "Charger inversed",
+          "HEAT"
+      };
+      std::string values = "";
+      uint16_t mask = modbus::helpers::word_from_hex_str(x, 0);
+      if (mask) {
+        for (int i = 8; i < FLAGS_SIZE + 8; i++) {
+          if (mask & (1 << i)) {
+            values.append(FLAGS[i - 8]);
+            values.append(";");
+          }
+        }
+        if (!values.empty()) values.pop_back();
+      }
+      return values;
+
+  - platform: modbus_controller
+    modbus_controller_id: bms_master
+    name: "master version information"
+    skip_updates: 120
+    address: 150
+    register_type: holding
+    register_count: 10
+    response_size: 20
+
+  - platform: modbus_controller
+    modbus_controller_id: bms_master
+    name: "master bms serial number"
+    skip_updates: 120
+    address: 160
+    register_type: holding
+    register_count: 10
+    response_size: 20
+
+  - platform: modbus_controller
+    modbus_controller_id: bms_master
+    name: "master battery pack serial number"
+    skip_updates: 120
+    address: 170
+    register_type: holding
+    register_count: 10
+    response_size: 20
+
+  # ------------------------------------------------------------
+  # SLAVE PACK READABLE BITMASK DECODERS
+  # ------------------------------------------------------------
+
+  - platform: modbus_controller
+    modbus_controller_id: bms_slave
+    name: "slave warnings"
+    skip_updates: 4
+    address: 9
+    register_type: holding
+    register_count: 1
+    response_size: 2
+    raw_encode: HEXBYTES
+    lambda: |-
+      static const uint8_t FLAGS_SIZE = 16;
+      static const char *const FLAGS[FLAGS_SIZE] = {
+          "Cell overvoltage",
+          "Cell undervoltage",
+          "Pack overvoltage",
+          "Pack undervoltage",
+          "Charging overcurrent",
+          "Discharging overcurrent",
+          "Reserve (Bit 7)",
+          "Reserve (Bit 8)",
+          "Charging overtemperature",
+          "Discharging overtemperature",
+          "Charging undertemperature",
+          "Discharging undertemperature",
+          "Environment overtemperature",
+          "Environment undertemperature",
+          "MOSFET overtemperature",
+          "Low state of charge"
+      };
+      std::string values = "";
+      uint16_t mask = modbus::helpers::word_from_hex_str(x, 0);
+      if (mask) {
+        for (int i = 0; i < FLAGS_SIZE + 0; i++) {
+          if (mask & (1 << i)) {
+            values.append(FLAGS[i - 0]);
+            values.append(";");
+          }
+        }
+        if (!values.empty()) values.pop_back();
+      }
+      return values;
+
+  - platform: modbus_controller
+    modbus_controller_id: bms_slave
+    name: "slave protections"
+    skip_updates: 4
+    address: 10
+    register_type: holding
+    register_count: 1
+    response_size: 2
+    raw_encode: HEXBYTES
+    lambda: |-
+      static const uint8_t FLAGS_SIZE = 16;
+      static const char *const FLAGS[FLAGS_SIZE] = {
+          "Cell overvoltage",
+          "Cell undervoltage",
+          "Pack overvoltage",
+          "Pack undervoltage",
+          "Charging overcurrent",
+          "Discharging overcurrent",
+          "Short circuit",
+          "Charging overvoltage",
+          "Charging overtemperature",
+          "Discharging overtemperature",
+          "Charging undertemperature",
+          "Discharging undertemperature",
+          "MOSFET overtemperature",
+          "Environment overtemperature",
+          "Environment undertemperature",
+          "Battery Full"
+      };
+      std::string values = "";
+      uint16_t mask = modbus::helpers::word_from_hex_str(x, 0);
+      if (mask) {
+        for (int i = 0; i < FLAGS_SIZE + 0; i++) {
+          if (mask & (1 << i)) {
+            values.append(FLAGS[i - 0]);
+            values.append(";");
+          }
+        }
+        if (!values.empty()) values.pop_back();
+      }
+      return values;
+
+  - platform: modbus_controller
+    modbus_controller_id: bms_slave
+    name: "slave faults"
+    skip_updates: 4
+    address: 11
+    register_type: holding
+    register_count: 1
+    response_size: 2
+    raw_encode: HEXBYTES
+    lambda: |-
+      static const uint8_t FLAGS_SIZE = 8;
+      static const char *const FLAGS[FLAGS_SIZE] = {
+          "Charging MOSFET fault",
+          "Discharging MOSFET fault",
+          "Temperature sensor",
+          "Reserve (Bit 4)",
+          "Battery cell fault",
+          "Front end sampling communication fault",
+          "Reserve (Bit 7)",
+          "Reserve (Bit 8)"
+      };
+      std::string values = "";
+      uint16_t mask = modbus::helpers::word_from_hex_str(x, 0);
+      if (mask) {
+        for (int i = 0; i < FLAGS_SIZE + 0; i++) {
+          if (mask & (1 << i)) {
+            values.append(FLAGS[i - 0]);
+            values.append(";");
+          }
+        }
+        if (!values.empty()) values.pop_back();
+      }
+      return values;
+
+  - platform: modbus_controller
+    modbus_controller_id: bms_slave
+    name: "slave status"
+    skip_updates: 4
+    address: 11
+    register_type: holding
+    register_count: 1
+    response_size: 2
+    raw_encode: HEXBYTES
+    lambda: |-
+      static const uint8_t FLAGS_SIZE = 8;
+      static const char *const FLAGS[FLAGS_SIZE] = {
+          "CHG",
+          "DCHG",
+          "MOSFET_CHG",
+          "MOSFET_DCHG",
+          "LIMIT_CHG",
+          "Reserve (Bit 13)",
+          "Charger inversed",
+          "HEAT"
+      };
+      std::string values = "";
+      uint16_t mask = modbus::helpers::word_from_hex_str(x, 0);
+      if (mask) {
+        for (int i = 8; i < FLAGS_SIZE + 8; i++) {
+          if (mask & (1 << i)) {
+            values.append(FLAGS[i - 8]);
+            values.append(";");
+          }
+        }
+        if (!values.empty()) values.pop_back();
+      }
+      return values;
+
+  - platform: modbus_controller
+    modbus_controller_id: bms_slave
+    name: "slave version information"
+    skip_updates: 120
+    address: 150
+    register_type: holding
+    register_count: 10
+    response_size: 20
+
+  - platform: modbus_controller
+    modbus_controller_id: bms_slave
+    name: "slave bms serial number"
+    skip_updates: 120
+    address: 160
+    register_type: holding
+    register_count: 10
+    response_size: 20
+
+  - platform: modbus_controller
+    modbus_controller_id: bms_slave
+    name: "slave battery pack serial number"
+    skip_updates: 120
+    address: 170
+    register_type: holding
+    register_count: 10
+    response_size: 20
+
+# ------------------------------------------------------------
+# CAPTIVE PORTAL
+# ------------------------------------------------------------
+# Allows fallback access if Wi-Fi credentials fail during commissioning.
+
+captive_portal:
