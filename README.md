@@ -1,756 +1,630 @@
-# ESPHome Hubble AM2 PACE BMS Monitor
+# PaceBMS — Pace BMS to MQTT Bridge
 
-> Current stable configuration reference: `hubble-am2-combined-v2.3-balanced-cell-diagnostics.yaml`
+A Python-based bridge for **Pace BMS** battery management systems. It reads live battery data from the BMS and publishes it to MQTT with **Home Assistant auto-discovery** support.
 
-
-ESPHome Hubble AM2 PACE BMS Monitor is an ESP32 RS485/Modbus configuration for monitoring Hubble AM2 battery packs in Home Assistant.
-
-It is built for Hubble AM2 batteries that use a PACE-based BMS and exposes detailed battery information through ESPHome, MQTT, and Home Assistant.
-
-The project supports a Master/Slave two-pack setup, automatic valid 13-cell detection, per-pack diagnostics, combined battery-bank calculations, projected runtime, projected charging time, and fault visibility without hiding stale or failed data.
+This project is for **Pace BMS protocol batteries** using the RS232/UART ASCII frame format. It is **not limited to Hubble**; Hubble AM2 is simply one tested example. The monitor auto-detects the number of packs and the number of cells reported by each pack, then publishes the matching Home Assistant MQTT entities. Additional packs are detected automatically when the batteries are correctly linked and their DIP switches / pack addresses are configured correctly.
 
 ---
 
+## File Versions
+
+| File | Version | Changed | Notes |
+|------|---------|---------|-------|
+| `bms_monitor.py` | 2.2.0 | 2026-05-16 | Direct Telegram notification engine, proper serial no-response disconnect detection, clean service-stop shutdown handling, MQTT status/error payloads, startup/shutdown/recovery events |
+| `bms_notify.py` | 1.0.0 | 2026-05-16 | Notification engine for Telegram alerts, SOC thresholds, warnings, FET alerts, SOH alerts, disconnect/recovery, daily summary, and cell delta reports |
+| `constants.py` | 1.0.0 | 2026-05-16 | Pace BMS protocol constants, CID2 codes, warning/protection state maps |
+| `config.yaml` | 2.0.15 | 2026-05-16 | Serial mode, Telegram settings, notification toggles, retry threshold, report schedule, MQTT settings, and HA add-on schema |
+
 ---
 
-## What This Project Does
+## Features
 
-This project allows one ESP32 to monitor two Hubble AM2 battery packs over RS485:
+- Reads cell voltages, temperatures, current, voltage, SOC, SOH, cycles, and capacity per pack
+- Auto-detects the number of packs reported by the master BMS, provided linked packs have correct DIP switch / address settings
+- Auto-detects the number of cells per pack, for example 13-cell Hubble AM2 packs or 16-cell Pace lithium packs
+- Supports multiple battery packs through the master battery connection where the BMS exposes linked packs
+- Publishes all data to MQTT with Home Assistant MQTT Discovery
+- Publishes Home Assistant availability using `pacebms/availability`
+- Sends Telegram notifications directly from Python, without needing Home Assistant automations
+- Detects real BMS communication loss when the serial adapter is still present but the battery is not replying
+- Sends disconnect and recovery Telegram notifications
+- Sends service startup and service stopped Telegram notifications
+- Publishes startup, shutdown, disconnect, and recovery events to MQTT as JSON
+- Supports SOC low alerts, SOC high alerts, warning flag alerts, FET alerts, SOH alerts, daily summary reports, and cell delta reports
+- Uses retained MQTT state topics by default so Home Assistant has values after restart
+- Runs as a Home Assistant add-on, standalone Docker container, or direct Python script
+- Supports Serial and TCP/IP connection modes
+- Structured logging with configurable debug levels
 
-```text
-Pack 1 / Master = Modbus address 0x01
-Pack 2 / Slave  = Modbus address 0x02
+---
+
+## Supported Hardware
+
+| BMS | Connection | Tested |
+|-----|------------|--------|
+| Pace BMS P16S200A | Serial USB | Yes |
+| Pace BMS AM-x series / Hubble AM2 | USB-RS232 to master battery RS232 port | Yes |
+| Other batteries using the Pace RS232/UART ASCII protocol | Serial USB or TCP/IP, depending on hardware | Expected, protocol-compatible |
+
+The monitor is intended for batteries that expose the **Pace BMS RS232/UART ASCII protocol**. It is not brand-locked to Hubble. Hubble AM2 is included because it has been tested and because it commonly uses a Pace-compatible BMS.
+
+---
+
+## Auto Cell and Pack Detection
+
+The monitor does **not** assume a fixed 16-cell battery and it does **not** assume a fixed number of battery packs. During each analog-data read, the BMS response includes the pack count and the cell count for each pack. The script reads those values and creates/publishes only the packs and cells reported by the BMS.
+
+Additional packs are detected automatically when:
+
+- The batteries are linked correctly using the manufacturer's battery link / communication ports.
+- The master battery is configured as the master.
+- Each slave battery has a unique address using the correct DIP switch settings.
+- The master BMS reports the linked packs through the Pace protocol.
+
+Examples:
+
+- A 13-cell Pace-compatible pack will publish `cell_01` to `cell_13`.
+- A 16-cell Pace-compatible pack will publish `cell_01` to `cell_16`.
+- A correctly configured master/slave installation will publish the packs returned by the master BMS, such as `pack_1` and `pack_2`.
+- If a slave pack is not shown, first check the battery link cable, DIP switch addressing, and whether the master BMS can see that slave pack.
+
+The `zero_pad_number_cells` setting only controls the **topic name format**. It does not force the number of cells. For example, `zero_pad_number_cells: 2` gives names like `cell_01`, `cell_02`, and `cell_13`.
+
+The `zero_pad_number_packs` setting only controls the **topic name format**. It does not force the number of packs. For example, `zero_pad_number_packs: 0` gives names like `pack_1` and `pack_2`.
+
+---
+
+## Multi-Pack Addressing Notes
+
+For multi-pack systems, this monitor reads pack information reported by the master BMS. It does not manually create extra packs in software. If additional packs do not appear in Home Assistant, the usual cause is that the master BMS is not reporting them.
+
+Check the following first:
+
+- The packs are connected using the correct battery link / communication cable.
+- The master pack is set to the correct master address.
+- Each slave pack has a unique DIP switch address.
+- The battery manufacturer allows multi-pack data to be queried from the master using the Pace protocol.
+- The monitor is connected to the port that exposes the Pace RS232/UART ASCII protocol.
+
+Once the master BMS reports the additional pack, the monitor will publish it automatically.
+
+
+### Example DIP switch address table
+
+Some Pace BMS manuals define the battery address using a 4-position DIP switch. The exact switch direction can vary by battery brand and enclosure, so always confirm against your own battery manual. The example table below follows the manual layout where switch **#1** is the lowest address bit.
+
+| Address | DIP #1 | DIP #2 | DIP #3 | DIP #4 | Typical role in manual |
+|---------|--------|--------|--------|--------|------------------------|
+| 0 | OFF | OFF | OFF | OFF | Independent / single battery use |
+| 1 | ON | OFF | OFF | OFF | Main / master pack |
+| 2 | OFF | ON | OFF | OFF | Pack 1 / first slave |
+| 3 | ON | ON | OFF | OFF | Pack 2 |
+| 4 | OFF | OFF | ON | OFF | Pack 3 |
+| 5 | ON | OFF | ON | OFF | Pack 4 |
+| 6 | OFF | ON | ON | OFF | Pack 5 |
+| 7 | ON | ON | ON | OFF | Pack 6 |
+| 8 | OFF | OFF | OFF | ON | Pack 7 |
+| 9 | ON | OFF | OFF | ON | Pack 8 |
+| 10 | OFF | ON | OFF | ON | Pack 9 |
+| 11 | ON | ON | OFF | ON | Pack 10 |
+| 12 | OFF | OFF | ON | ON | Pack 11 |
+| 13 | ON | OFF | ON | ON | Pack 12 |
+| 14 | OFF | ON | ON | ON | Pack 13 |
+| 15 | ON | ON | ON | ON | Pack 14 |
+
+In plain terms: for multi-pack operation, do not leave every battery on the same DIP setting. One pack must be set as the main/master pack, and each additional pack must have its own unique address. Once the master BMS sees those packs, this software will publish them automatically.
+
+---
+
+## Hubble AM2 Notes
+
+The Hubble AM2 has RS232 and RS485 communication ports. This project uses the **RS232 port** on the **master battery**.
+
+Recommended setup:
+
+1. Connect the USB-RS232 adapter to the **RS232 port** on the master battery.
+2. Link the slave battery to the master using the normal battery link cable.
+3. Set DIP switches correctly according to the battery manual. A common Pace-style setup is:
+   - Single independent battery = address 0
+   - Main / master battery = address 1
+   - First slave battery = address 2
+   - Next slave batteries = unique addresses after that
+4. Read all reported packs through the master battery.
+
+Important: the Hubble AM2 RS485 port uses Modbus RTU and is not the same as the Pace RS232 ASCII protocol used by this monitor.
+
+---
+
+## Requirements
+
+- Python 3.11+
+- MQTT broker, for example Mosquitto
+- Home Assistant, optional but recommended
+- USB-RS232 adapter for serial monitoring, where required by your Pace BMS hardware
+
+Python dependencies:
+
+```txt
+paho-mqtt
+pyserial
+pyyaml
 ```
 
-The ESP32 reads data from both packs and publishes the values to Home Assistant.
+Telegram uses Python's built-in `urllib`, so no extra Telegram library is required.
 
-It provides:
+---
 
-```text
-Master battery voltage, current, power, SOC and SOH
-Slave battery voltage, current, power, SOC and SOH
-Master and Slave remaining/full/design capacity
-Master and Slave cell voltages
-Master and Slave cell balancing status
-Master and Slave warnings, protections, faults and status
-Master and Slave temperatures
-Combined battery-bank totals
-Combined cell-health values
-Projected runtime while discharging
-Projected charging time while charging
+## Installation
+
+### Option A — Home Assistant Add-on
+
+1. In Home Assistant, go to **Settings -> Add-ons -> Add-on Store**.
+2. Click the three-dot menu and choose **Repositories**.
+3. Add this repository:
+
+```txt
+https://github.com/saratrax13-sketch/serial_rs232_pacebms
 ```
 
-The project is monitoring-only. It does not write settings to the BMS.
+4. Install the add-on.
+5. Configure the add-on under the **Configuration** tab.
+6. Start the add-on.
+
+### Option B — Docker Compose
+
+```bash
+git clone https://github.com/saratrax13-sketch/serial_rs232_pacebms.git
+cd serial_rs232_pacebms
+```
+
+Edit `config.yaml`, then start the container:
+
+```bash
+docker compose up -d
+```
+
+View logs:
+
+```bash
+docker compose logs -f
+```
+
+### Option C — Direct Python
+
+```bash
+git clone https://github.com/saratrax13-sketch/serial_rs232_pacebms.git
+cd serial_rs232_pacebms
+pip install -r requirements.txt
+python3 bms_monitor.py
+```
+
+The script loads configuration from `/data/options.json` when running as a Home Assistant add-on. For local development it also checks for `pace-bms-dev/config.yaml`.
 
 ---
 
-## Key Features
+## Configuration
 
-- ESP32 + RS485 monitoring
-- Hubble AM2 PACE BMS support
-- Master/Slave battery support
-- One ESP32 reads both batteries on a shared RS485 bus
-- Automatic valid cell-count detection
-- Correctly detects Hubble AM2 as 13 cells per pack
-- Reads up to 16 possible cells but ignores invalid/unused cells
-- Per-pack cell voltage monitoring
-- Per-pack cell balancing monitoring
-- Per-pack warning, protection, fault and status decoding
-- Combined battery-bank calculations
-- Projected runtime in minutes
-- Projected charging time in minutes
-- MQTT/Home Assistant support
-- Timeout handling to avoid stale data being shown as live data
-- Detailed cell-voltage diagnostics retained for fault finding
-- Per-cell balancing entities disabled by default in Home Assistant to reduce dashboard clutter
-- Optimized Modbus range reads for lower RS485 bus load
-- Local ESPHome web server disabled in the current diagnostic configuration
-- Clear comments inside the ESPHome YAML for maintenance and troubleshooting
+All settings are configured under the `options:` section in `config.yaml`, or through the Home Assistant add-on Configuration tab.
 
----
+### Main settings
 
-## Hardware Required
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `telegram_bot_token` | string | — | Telegram bot token from BotFather |
+| `telegram_chat_id` | string | — | Telegram chat ID for notifications |
+| `notify_enabled` | bool | `true` | Master switch for all Telegram notifications |
+| `mqtt_host` | string | — | MQTT broker IP address or hostname |
+| `mqtt_port` | int | `1883` | MQTT broker port |
+| `mqtt_user` | string | — | MQTT username |
+| `mqtt_password` | string | — | MQTT password |
+| `mqtt_base_topic` | string | `pacebms` | Root MQTT topic |
+| `mqtt_ha_discovery` | bool | `true` | Enable Home Assistant MQTT Discovery |
+| `mqtt_ha_discovery_topic` | string | `homeassistant` | Home Assistant discovery prefix |
+| `connection_type` | `IP` or `Serial` | `Serial` | BMS connection method |
+| `bms_ip` | string | — | BMS IP address, only used in IP mode |
+| `bms_port` | int | `5000` | BMS TCP port, only used in IP mode |
+| `bms_serial` | string | `/dev/ttyUSB0` | Serial device path, only used in Serial mode |
+| `bms_baudrate` | int | `9600` | Serial baud rate |
+| `scan_interval` | int | `5` | Seconds between full BMS polling cycles |
+| `debug_output` | int | `0` | `0` info only, `1` debug, `3` raw frames |
+| `zero_pad_number_cells` | int | `2` | Cell topic padding, for example `cell_01` |
+| `zero_pad_number_packs` | int | `0` | Pack topic padding. `0` gives `pack_1`, `pack_2` |
 
-- ESP32 development board
-- RS485-to-TTL board/module
-- Hubble AM2 battery pack
-- Second Hubble AM2 pack if using Master/Slave
-- RJ45 breakout cable or suitable battery communication cable
-- Twisted pair cable for RS485 A/B where possible
-- Common ground wire if required by your RS485 board/battery setup
+### Notification settings
 
----
+| Option | Default | Description |
+|--------|---------|-------------|
+| `notify_soc_low` | `true` | Alert when SOC crosses configured low thresholds |
+| `notify_soc_high` | `true` | Alert when SOC reaches high-charge threshold |
+| `notify_warnings` | `true` | Alert on BMS warning flags |
+| `notify_fet` | `true` | Alert when charge/discharge FET turns off unexpectedly |
+| `notify_soh` | `true` | Alert when SOH drops below configured threshold |
+| `notify_disconnect` | `true` | Alert when the BMS stops replying and when it recovers |
+| `notify_startup` | `true` | Alert when monitor starts or stops |
+| `notify_daily_summary` | `true` | Send daily kWh and worst cell summary |
+| `notify_delta_report` | `true` | Send cell delta report for the configured window |
+| `notify_soc_low_thresholds` | `75,50,25,10` | SOC levels that trigger low battery alerts |
+| `notify_soc_high_threshold` | `98` | SOC level that triggers high-charge alert |
+| `notify_soc_high_reset` | `95` | SOC must drop below this before another high-charge alert is sent |
+| `notify_soh_threshold` | `95` | SOH percentage below which an alert is sent |
+| `notify_retry_count` | `1` | Failed BMS communication attempts before disconnect alert. `1` means alert on first failed read |
+| `notify_daily_summary_time` | `19:00` | Daily summary time |
+| `notify_delta_report_time` | `10:15` | Cell delta report time |
+| `notify_delta_window_start` | `00:00` | Start of delta tracking window |
+| `notify_delta_window_end` | `10:00` | End of delta tracking window |
 
-## ESP32 to RS485 Board Wiring
-
-The ESP32 connects to the RS485 board using UART TX/RX and a flow-control pin.
-
-Example wiring used in this project:
-
-| ESP32 Pin | RS485 Board Pin | Purpose |
-|---|---|---|
-| GPIO16 | RX / RO | ESP32 receives data from RS485 board |
-| GPIO17 | TX / DI | ESP32 sends data to RS485 board |
-| GPIO18 | DE / RE | RS485 transmit/receive direction control |
-| GND | GND | Common ground |
-| 3.3V or 5V | VCC | Power for RS485 board, depending on board requirements |
-
-> Important: Check your RS485 board voltage requirements. Some RS485 modules are 3.3V compatible, while others expect 5V. Do not power a 3.3V-only board from 5V unless it is rated for it.
-
-Typical ESPHome UART configuration:
+Recommended value for fast disconnect testing:
 
 ```yaml
-uart:
-  - id: uart_0
-    tx_pin: GPIO17
-    rx_pin: GPIO16
-    baud_rate: 9600
-    stop_bits: 1
-    parity: NONE
+notify_retry_count: 1
 ```
 
-Typical Modbus configuration used by the stable v2.3 file:
-
-```yaml
-modbus:
-  - id: modbus0
-    uart_id: uart_0
-    flow_control_pin: GPIO18
-    send_wait_time: 750ms
-```
-
-The `750ms` wait time is intentionally conservative because both Master and Slave batteries share one physical RS485 bus. This helps prevent shifted/corrupted reads and random unavailable values during polling.
+This is important for serial testing because the USB adapter may remain connected even when the battery-side cable is unplugged. The monitor now treats a failed BMS response as the actual disconnect condition.
 
 ---
 
-## RS485 Board to Battery Wiring
+## Finding the Serial Device Path
 
-The RS485 side of the RS485 board connects to the Hubble AM2 battery RS485 communication port.
+Use the stable `by-id` path where possible:
 
-Typical RS485 signal naming:
-
-| RS485 Board | Battery/BMS |
-|---|---|
-| A / D+ / 485+ | A / D+ / 485+ |
-| B / D- / 485- | B / D- / 485- |
-| GND / COM | GND / COM, if required |
-
-Different manufacturers sometimes label A/B differently. If the BMS does not communicate, and all other settings are correct, try swapping A and B.
-
----
-
-## Master/Slave RS485 Bus Wiring
-
-For one ESP32 to read both the Hubble AM2 Master and Slave battery, both batteries must be on the same RS485 bus.
-
-Use a daisy-chain/bus layout:
-
-```text
-ESP32 RS485 Board
-   A / D+  ───── Master A / D+  ───── Slave A / D+
-   B / D-  ───── Master B / D-  ───── Slave B / D-
-   GND     ───── Master GND     ───── Slave GND, if required
+```bash
+ls /dev/serial/by-id/
 ```
-
-Visual layout:
-
-```text
-┌──────────────┐       ┌──────────────┐       ┌──────────────┐
-│ ESP32 RS485  │       │ Hubble AM2   │       │ Hubble AM2   │
-│ Board        │       │ Master       │       │ Slave        │
-│              │       │              │       │              │
-│ A / D+  ─────┼───────┤ A / D+  ─────┼───────┤ A / D+       │
-│ B / D-  ─────┼───────┤ B / D-  ─────┼───────┤ B / D-       │
-│ GND     ─────┼───────┤ GND     ─────┼───────┤ GND          │
-└──────────────┘       └──────────────┘       └──────────────┘
-```
-
-Avoid a star layout:
-
-```text
-                 ┌──── Master
-ESP32 RS485 ─────┤
-                 └──── Slave
-```
-
-RS485 works best as a bus/daisy-chain.
-
----
-
-## Modbus Addressing
-
-The project assumes:
-
-```text
-Hubble AM2 Master = 0x01
-Hubble AM2 Slave  = 0x02
-```
-
-Example ESPHome Modbus controller section used by the stable v2.3 file:
-
-```yaml
-modbus_controller:
-  # Hubble AM2 Master
-  - id: bms_master
-    address: 0x01
-    modbus_id: modbus0
-    setup_priority: -10
-    command_throttle: 750ms
-    update_interval: 30s
-    offline_skip_updates: 3
-
-  # Hubble AM2 Slave
-  - id: bms_slave
-    address: 0x02
-    modbus_id: modbus0
-    setup_priority: -10
-    command_throttle: 750ms
-    update_interval: 35s
-    offline_skip_updates: 3
-```
-
-The Master and Slave update intervals are staggered slightly. This reduces the chance of both batteries being polled at the same moment on the shared RS485 bus.
-
-If the Slave battery does not respond, check that it is physically connected to the same RS485 bus and configured with a unique Modbus address.
-
----
-
-## RJ45 RS485 Pinout Documentation
-
-Many Hubble AM2 / PACE-based batteries expose communication through RJ45-style ports.
-
-> Important: RJ45 does not automatically mean Ethernet. On battery BMS systems, an RJ45 socket may be used for RS485, CAN, battery-to-battery linking, or inverter communication.
-
-Always confirm the Hubble AM2 / PACE BMS pinout against the battery documentation before wiring.
-
----
-
-## Common RJ45 Numbering
-
-When looking at an RJ45 plug with the clip facing away from you and the copper contacts facing up, pin 1 is usually on the left:
-
-```text
-Copper contacts facing up
-Clip facing away
-
-Pin:  1  2  3  4  5  6  7  8
-      |  |  |  |  |  |  |  |
-     [------------------------]
-```
-
-Another view:
-
-```text
-RJ45 plug front view, contacts up:
-
-  1  2  3  4  5  6  7  8
-┌────────────────────────────┐
-│ ▓  ▓  ▓  ▓  ▓  ▓  ▓  ▓     │
-└────────────────────────────┘
-```
-
-Always confirm orientation before crimping or probing.
-
----
-
-## Common PACE / Pylon-Style RS485 RJ45 Pinout
-
-A commonly used RS485 pinout on many PACE/Pylon-style lithium batteries is:
-
-| RJ45 Pin | Signal | Notes |
-|---|---|---|
-| Pin 1 | RS485-B / 485B / D- | Inverting RS485 line |
-| Pin 2 | RS485-A / 485A / D+ | Non-inverting RS485 line |
-| Pin 3 | NC / Reserved | May vary by battery |
-| Pin 4 | CAN-H | Used for CAN, not RS485 |
-| Pin 5 | CAN-L | Used for CAN, not RS485 |
-| Pin 6 | NC / Reserved | May vary by battery |
-| Pin 7 | GND / COM | Communication ground on some models |
-| Pin 8 | GND / COM | Communication ground on some models |
-
-> Warning: This is a common pattern, not a universal rule. Some batteries swap A/B, use different ground pins, or use separate RJ45 ports for inverter CAN and RS485 monitoring.
-
----
-
-## RS485 Connection from RJ45 to RS485 Board
-
-If your Hubble AM2 / PACE BMS uses the common pinout above, the connection to the RS485 board would normally be:
-
-| Battery RJ45 Pin | Battery Signal | RS485 Board |
-|---|---|---|
-| Pin 1 | RS485-B / D- | B / D- / 485- |
-| Pin 2 | RS485-A / D+ | A / D+ / 485+ |
-| Pin 7 or 8 | GND / COM | GND, if required |
 
 Example:
 
-```text
-Battery RJ45 Pin 2  RS485-A / D+  ───── RS485 board A / D+ / 485+
-Battery RJ45 Pin 1  RS485-B / D-  ───── RS485 board B / D- / 485-
-Battery RJ45 Pin 7  GND / COM     ───── RS485 board GND, if required
+```yaml
+bms_serial: "/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0"
 ```
 
-If there is no communication but everything else is correct, try swapping A and B:
-
-```text
-Battery A / D+  -> RS485 board B / D-
-Battery B / D-  -> RS485 board A / D+
-```
-
-Some manufacturers label A/B opposite to the RS485 board manufacturer.
+This is better than `/dev/ttyUSB0` or `/dev/ttyUSB1`, because USB numbering can change after a reboot.
 
 ---
 
-## T568B RJ45 Wire Colours
+## MQTT Topics
 
-If the RJ45 cable uses standard T568B wiring, the wire colours are usually:
+All topics are published under `{mqtt_base_topic}/`. The default base topic is `pacebms/`.
 
-| RJ45 Pin | T568B Colour |
-|---|---|
-| Pin 1 | White/Orange |
-| Pin 2 | Orange |
-| Pin 3 | White/Green |
-| Pin 4 | Blue |
-| Pin 5 | White/Blue |
-| Pin 6 | Green |
-| Pin 7 | White/Brown |
-| Pin 8 | Brown |
+### Per-pack topics
 
-Using the common PACE/Pylon-style RS485 pinout:
+With `zero_pad_number_packs: 0`, pack topics are published as `pack_1`, `pack_2`, etc.
 
-| Function | RJ45 Pin | T568B Colour |
-|---|---|---|
-| RS485-B / D- | Pin 1 | White/Orange |
-| RS485-A / D+ | Pin 2 | Orange |
-| GND / COM | Pin 7 or 8 | White/Brown or Brown |
+| Topic | Unit | Description |
+|-------|------|-------------|
+| `pacebms/pack_1/v_cells/cell_01` | mV | Individual cell voltage |
+| `pacebms/pack_1/temps/temp_1` | °C | Temperature sensor |
+| `pacebms/pack_1/v_pack` | V | Pack voltage |
+| `pacebms/pack_1/i_pack` | A | Pack current. Negative means charging |
+| `pacebms/pack_1/soc` | % | State of charge |
+| `pacebms/pack_1/soh` | % | State of health |
+| `pacebms/pack_1/i_remain_cap` | Ah | Remaining capacity |
+| `pacebms/pack_1/i_full_cap` | Ah | Full charge capacity |
+| `pacebms/pack_1/i_design_cap` | Ah | Design capacity |
+| `pacebms/pack_1/cycles` | — | Charge cycle count |
+| `pacebms/pack_1/cells_max_diff_calc` | mV | Maximum cell voltage spread |
+| `pacebms/pack_1/warnings` | — | Active warning string |
+| `pacebms/pack_1/balancing1` | — | Cell balancing state bits |
+| `pacebms/pack_1/balancing2` | — | Cell balancing state bits |
+| `pacebms/pack_1/charge_fet` | ON/OFF | Charge FET state |
+| `pacebms/pack_1/discharge_fet` | ON/OFF | Discharge FET state |
+| `pacebms/pack_1/prot_short_circuit` | ON/OFF | Short circuit protection active |
 
-> Always test continuity with a multimeter. Do not rely only on cable colour, especially with pre-made or non-standard cables.
+### Aggregate topics
 
----
+| Topic | Unit | Description |
+|-------|------|-------------|
+| `pacebms/pack_remain_cap` | Ah | Total remaining capacity across all packs |
+| `pacebms/pack_full_cap` | Ah | Total full capacity |
+| `pacebms/pack_design_cap` | Ah | Total design capacity |
+| `pacebms/pack_soc` | % | Overall SOC |
+| `pacebms/pack_soh` | % | Overall SOH |
+| `pacebms/availability` | online/offline | Bridge availability |
+| `pacebms/bms_version` | — | BMS firmware version |
+| `pacebms/bms_sn` | — | BMS serial number |
+| `pacebms/pack_sn` | — | Battery pack serial number |
 
-## CAN Port vs RS485 Port
+### Status and error topics
 
-Many Hubble/PACE-style batteries have multiple RJ45 communication ports, for example:
+| Topic | Payload | Description |
+|-------|---------|-------------|
+| `pacebms/bms_status` | JSON | Startup and shutdown events |
+| `pacebms/bms_error` | JSON | Disconnect and recovery events |
 
-```text
-CAN / Inverter communication port
-RS485 / BMS monitoring port
-Link / battery-to-battery port
+Example startup payload:
+
+```json
+{"status": "startup", "bms_sn": "ABC123", "bms_version": "1.23"}
 ```
 
-This ESPHome project uses RS485/Modbus.
+Example shutdown payload:
 
-Do not connect the ESP32 RS485 board to CAN-H or CAN-L.
-
-If the battery has a dedicated RS485 port, use that port.
-
-If the battery uses the same physical RJ45 connector for multiple communication types, confirm which pins are RS485 A/B before connecting.
-
----
-
-## RJ45 Safety Checklist
-
-Before powering the ESP32/RS485 monitor:
-
-```text
-Confirm the battery RJ45 pinout from the manual
-Confirm whether the port is RS485, not CAN-only
-Confirm RJ45 pin 1 orientation
-Confirm A/B wiring with a continuity tester
-Confirm GND/COM is connected only if required
-Confirm no battery power pins are connected to the RS485 board
-Confirm only one ESP32/device is polling the RS485 bus
+```json
+{"status": "shutdown", "bms_sn": "ABC123", "timestamp": 1778940000}
 ```
 
-Incorrect RJ45 wiring can prevent communication and may damage hardware if voltage pins are connected incorrectly.
+Example disconnect payload:
 
----
-
-## Auto Cell-Count Detection
-
-The configuration reads up to 16 possible cell-voltage registers per pack.
-
-Only realistic lithium cell voltages are counted as valid cells.
-
-Typical valid range:
-
-```text
-2.0V to 5.0V
+```json
+{"status": "disconnected", "reason": "Receive failed", "retry_count": 1, "offline_time": "0s", "offline_secs": 0, "timestamp": 1778940000}
 ```
 
-For Hubble AM2 packs, the expected result is:
+Example recovery payload:
 
-```text
-Master detected cells = 13
-Slave detected cells  = 13
-Combined detected cells = 26
-```
-
-Example behaviour:
-
-```text
-Cell 1-13 = valid voltage
-Cell 14-16 = unavailable / NaN
-Detected cell count = 13
-```
-
-The unused cells are not included in:
-
-```text
-Minimum cell voltage
-Maximum cell voltage
-Average cell voltage
-Delta cell voltage
-Detected cell count
-Combined battery calculations
+```json
+{"status": "recovered", "retry_count": 1, "offline_time": "10s", "offline_secs": 10, "timestamp": 1778940010}
 ```
 
 ---
 
-## Combined Battery Calculations
+## Telegram Notifications
 
-For Master/Slave batteries connected in parallel, combined values are calculated as follows:
+Notifications are sent directly from `bms_notify.py` using the Telegram Bot API.
 
-| Combined Value | Calculation |
-|---|---|
-| Total Current | Master current + Slave current |
-| Total Power | Master power + Slave power |
-| Total Remaining Capacity | Master remaining Ah + Slave remaining Ah |
-| Total Full Capacity | Master full Ah + Slave full Ah |
-| Total Design Capacity | Master design Ah + Slave design Ah |
-| Average Pack Voltage | Average of valid Master/Slave voltages |
-| Combined SOC | Weighted by remaining capacity and full capacity |
-| Combined SOH | Based on full capacity versus design capacity |
-| Total Detected Cells | Master detected cells + Slave detected cells |
-| Lowest Cell Voltage | Lowest valid cell across both packs |
-| Highest Cell Voltage | Highest valid cell across both packs |
-| Worst Delta Cell Voltage | Highest pack delta |
+Home Assistant automations are no longer required for the core Telegram messages. MQTT status and error topics are still published, so Home Assistant automations can still be added if you want phone push notifications or extra dashboards.
 
-> Do not add pack voltages together when packs are connected in parallel.
+### Telegram setup
 
----
-
-## Projected Runtime and Charging Time
-
-The project includes projected runtime and charging-time sensors.
-
-Runtime while discharging:
-
-```text
-Remaining capacity Ah ÷ discharge current A = runtime
-```
-
-Charging time while charging:
-
-```text
-(Full capacity Ah - remaining capacity Ah) ÷ charge current A = time to full
-```
-
-The projected time sensors publish in minutes to avoid Home Assistant displaying sub-1-hour values as `0 h`.
+1. Open Telegram and create a bot with BotFather.
+2. Copy the bot token into `telegram_bot_token`.
+3. Send `/start` to your new bot.
+4. Get your chat ID from a Telegram user info bot.
+5. Copy the chat ID into `telegram_chat_id`.
+6. Restart the add-on or service.
 
 Example:
 
-```text
-Projected Runtime: 45 min
-Projected Charging Time: 38 min
+```yaml
+telegram_bot_token: "YOUR_BOT_TOKEN"
+telegram_chat_id: "123456789"
 ```
 
-The sensors intentionally return unavailable/NaN when not applicable:
+### Expected Telegram messages
 
-```text
-Runtime while charging = unavailable
-Charging time while discharging = unavailable
-Charging time when battery is already full = 0 min
-Runtime when current is near zero = unavailable
-```
+You should receive messages for:
 
-This avoids misleading values such as extremely high runtime estimates when current is close to zero.
+- Monitor started
+- Monitor stopped
+- BMS disconnected
+- BMS reconnected
+- Low SOC threshold reached
+- Battery fully charged
+- BMS warning detected
+- BMS warning cleared
+- FET alert
+- SOH degradation alert
+- Daily summary
+- Cell delta report
 
 ---
 
-## Data Trust and Timeout Behaviour
+## Disconnect and Service-Stop Behaviour
 
-The configuration is designed not to hide communication failures by holding stale values forever.
+This version improves two important failure cases.
 
-The recommended behaviour is:
+### Battery cable disconnected
 
-```text
-Good fresh value received = publish value
-Invalid/impossible value = reject value
-No fresh live value within timeout = unavailable
+When the cable between the battery and the serial adapter is disconnected, the USB adapter may still exist as `/dev/ttyUSB1`. Older logic could therefore think the serial port was still connected.
+
+The monitor now treats an empty serial read as a real communication failure:
+
+```txt
+BMS serial recv: no data received before timeout
 ```
 
-This helps ensure that Home Assistant cards show actual live data rather than old values that make a failed link look healthy.
+It then publishes `pacebms/availability = offline`, sends a Telegram disconnect alert, and retries the BMS connection.
+
+### Service stopped
+
+The monitor now handles normal Python exit plus service termination signals. This allows the `BMS Monitor Stopped` Telegram message to be sent when the Home Assistant add-on, Docker container, or Python service is stopped cleanly.
 
 ---
 
-## MQTT Startup Protection
+## Home Assistant
 
-The v2.3 configuration includes MQTT startup protection to reduce message flooding when the ESP32 boots and many sensors publish at the same time.
+When `mqtt_ha_discovery: true`, sensors are created automatically in Home Assistant.
 
-Key behaviours:
+Sensors include suitable Home Assistant metadata:
 
-```text
-MQTT logs are not published into MQTT
-MQTT birth, will and shutdown messages are disabled
-MQTT keepalive is set to 30s
-MQTT async sending is disabled
-Heavy cell-voltage publishing is delayed briefly after boot
+- Cell and pack voltages -> voltage
+- Current -> current
+- Temperatures -> temperature
+- SOC/SOH -> battery percentage
+- Ah capacity values -> measurement sensors without an energy device class
+
+Binary sensors such as FETs and protection states use `ON` and `OFF` payloads.
+
+Discovery topics are republished every hour and after reconnects.
+
+---
+
+## Architecture
+
+```txt
+Pace-compatible BMS battery system
+    |
+    +-- Master battery RS232/UART Pace protocol port
+    |
+USB-RS232 adapter
+    |
+bms_monitor.py
+    |
+    +-- Pace protocol request/response parser
+    +-- Data model: AnalogData / PackData / PackCapacity / WarnData
+    +-- MQTT publisher
+    +-- Home Assistant MQTT Discovery
+    +-- bms_notify.py Telegram notification engine
+    |
+MQTT Broker
+    |
+Home Assistant
 ```
 
-Recommended MQTT behaviour:
+---
+
+## Debugging
+
+Set `debug_output` in config:
+
+| Level | What you see |
+|-------|--------------|
+| `0` | Normal startup, connection, and pack summary logs |
+| `1` | Debug logs, including skipped bytes between packs |
+| `3` | Raw request and response frames |
+
+View logs:
+
+```bash
+# Home Assistant add-on
+Settings -> Add-ons -> BMS Pace -> Logs
+
+# Docker
+docker compose logs -f
+
+# Direct Python
+python3 bms_monitor.py
+```
+
+---
+
+## Recommended Test Procedure
+
+After installing the fixed files:
+
+1. Start the add-on or service.
+2. Confirm you receive `BMS Monitor Started` in Telegram.
+3. Disconnect the battery-side serial cable.
+4. Confirm you receive `BMS Disconnected`.
+5. Reconnect the cable.
+6. Confirm you receive `BMS Reconnected`.
+7. Stop the add-on or service.
+8. Confirm you receive `BMS Monitor Stopped`.
+
+For quick testing, use:
 
 ```yaml
-mqtt:
-  log_topic: null
-  keepalive: 30s
-  reboot_timeout: 0s
-  birth_message:
-  will_message:
-  shutdown_message:
-  idf_send_async: false
-```
-
-This helps prevent dropped MQTT messages during startup when the ESP32 publishes battery values, cell values and diagnostics together.
-
----
-
-## Cell Voltage Startup Behaviour
-
-To reduce MQTT startup flooding, individual cell-voltage publishing is delayed for approximately 30 seconds after boot.
-
-Expected behaviour after restart:
-
-```text
-Main pack values appear first
-Individual cell voltages appear after the startup delay
-Combined cell-health values become valid after both Master and Slave cell batches have reported
-```
-
-This is normal and does not indicate a Modbus fault. The main battery dashboard should become usable quickly, while detailed cell-health cards may take slightly longer after a reboot.
-
-The configuration may also use small delta filters on individual cell-voltage sensors. This means a cell sensor may not republish if the value has not changed enough. Home Assistant will continue showing the last valid value, which reduces MQTT and database load.
-
----
-
-## Dashboard Behaviour After Reboot
-
-After the ESP32 restarts, Home Assistant may show the main battery values before detailed cell values.
-
-Typical startup order:
-
-```text
-SOC, current, voltage, power and capacity appear first
-Individual cell voltages appear after the startup delay
-Combined cell values appear once both Master and Slave cell readings are available
-```
-
-Recommended dashboard layout:
-
-```text
-Main battery card:
-Combined SOC
-Combined current
-Combined power
-Average pack voltage
-Remaining capacity
-SOH
-Runtime / charging time
-
-Detail / diagnostic card:
-Master and Slave cell voltages
-Lowest and highest cell voltage
-Worst delta cell voltage
-Temperatures
-Warnings, protections and fault bitmasks
-```
-
-For normal users, the main dashboard card should remain clean and responsive. The detailed cell card may take a short time to populate after reboot.
-
----
-
-## MQTT and Home Assistant
-
-Suggested MQTT identity and stable behaviour for this project:
-
-```yaml
-mqtt:
-  topic_prefix: hubble_am2/combined
-  log_topic: null
-  keepalive: 30s
-  reboot_timeout: 0s
-  birth_message:
-  will_message:
-  shutdown_message:
-  idf_send_async: false
-```
-
-Suggested ESPHome identity:
-
-```yaml
-substitutions:
-  name: hubble-am2-combined
-  friendly_name: "Hubble AM2 Combined"
-  device_description: "Hubble AM2 Combined Master and Slave battery monitor via RS485/Modbus to MQTT - v2.3 diagnostics optimized polling"
-```
-
-Current v2.3 behaviour:
-
-```text
-Master pack Modbus polling: 30s
-Slave pack Modbus polling: 35s
-Combined/template recalculation: 10s
-Wi-Fi signal and ESP32 uptime: 60s
-Local web server: disabled
-Per-cell voltage diagnostics: enabled
-Per-cell balancing binary sensors: disabled by default in Home Assistant
-```
-
-Example Home Assistant entities:
-
-```text
-sensor.hubble_am2_combined_master_state_of_charge
-sensor.hubble_am2_combined_slave_state_of_charge
-sensor.hubble_am2_combined_combined_state_of_charge
-sensor.hubble_am2_combined_combined_total_current
-sensor.hubble_am2_combined_combined_projected_runtime
-sensor.hubble_am2_combined_combined_projected_charging_time
-```
-
----
-
-## Home Assistant Dashboard Card
-
-The repository can include a `card.yaml` file for a Lovelace dashboard card.
-
-Recommended card sections:
-
-```text
-Combined overview
-Projected runtime / charging time
-Combined cell health
-Master pack summary
-Slave pack summary
-Master/Slave cell health
-Master/Slave temperatures
-Master/Slave BMS status
-Master/Slave cell voltages
-Master/Slave cell balancing
-Diagnostics / identity
+scan_interval: 5
+notify_retry_count: 1
 ```
 
 ---
 
 ## Troubleshooting
 
-### Master reads, but Slave does not
+### Sensors show `Unknown` in Home Assistant
 
-Check:
+Delete stale retained MQTT topics using MQTT Explorer, then restart the add-on so discovery is republished.
 
-```text
-Slave is connected to the same RS485 bus
-Slave has a unique Modbus address
-Slave address matches the YAML address
-RS485 A/B wiring is correct
-Only one ESP32 is polling the bus
+### Only some cells are showing
+
+The parser auto-detects pack boundaries. Set `debug_output: 1` and check the logs.
+
+### Slave or additional packs are not showing
+
+The monitor can only publish packs that the master BMS reports. Check the battery link cable, DIP switch addressing, and master/slave configuration. Each slave pack must have a unique address according to the battery manufacturer's DIP switch table. After correcting the DIP switches, restart the BMS/monitor if required and check the logs for the detected pack count.
+
+### Cell topics sort incorrectly
+
+Keep this setting:
+
+```yaml
+zero_pad_number_cells: 2
 ```
 
-### All readings are unavailable
+This gives correctly sorted names such as `cell_01`, `cell_02`, and so on. It does not force 16 cells; a 13-cell pack will still only publish cells reported by the BMS.
 
-Check:
+### Pack topics are different from older README examples
 
-```text
-ESP32 UART pins
-RS485 board power
-RS485 DE/RE flow-control pin
-RS485 A/B polarity
-Battery RS485 port selection
-Modbus baud rate
-Battery communication address
+With the current recommended config:
+
+```yaml
+zero_pad_number_packs: 0
 ```
 
-### Partial responses or Modbus timeouts
+Topics use:
 
-Check:
-
-```text
-RS485 wiring quality
-Cable length
-Termination resistor
-Multiple devices polling the same bus
-Update intervals too aggressive
-MQTT overload from too many sensors
+```txt
+pacebms/pack_1/...
+pacebms/pack_2/...
 ```
 
-### Cell 14-16 show unavailable
+not:
 
-This is normal for Hubble AM2 13S packs.
-
-The sensors remain available in the YAML for compatibility with 16S PACE BMS layouts, but they are ignored in calculations when invalid.
-
-### Projected charging time shows 0 min
-
-This is normal when the battery is already full.
-
-Example:
-
-```text
-Full capacity = 90.30 Ah
-Remaining capacity = 90.30 Ah
-Capacity needed = 0 Ah
-Charging time = 0 min
+```txt
+pacebms/pack_01/...
+pacebms/pack_02/...
 ```
 
-### Projected runtime shows unavailable
+### Serial not connecting
 
-This is normal when the battery is not discharging or when current is too close to zero.
+Use the stable `/dev/serial/by-id/` path if possible. Also make sure the add-on has:
 
-### Warnings show Cell Overvoltage / Battery Full
-
-This can happen when the battery is full and individual cells are near the upper protection threshold. Check the BMS status, cell voltages, inverter charge settings, and manufacturer limits.
-
-### Cell readings take about 30 seconds to appear after reboot
-
-This is expected in the v2.3 configuration.
-
-The configuration delays heavy cell-voltage publishing after startup to reduce MQTT queue flooding. Main battery values should appear first. Cell-voltage and combined cell-health values become available once both Master and Slave cell batches have reported.
-
-### MQTT dropped messages at startup
-
-If logs show dropped MQTT messages, check:
-
-```text
-MQTT log_topic is disabled
-idf_send_async is false
-Cell voltage startup delay is enabled
-Too many diagnostic sensors are not publishing too frequently
-Wi-Fi signal is stable
+```yaml
+uart: true
+usb: true
 ```
 
-If the main values are stable but the dropped-message warning appears only once at boot, the system may still be usable. Repeated MQTT dropped-message warnings during normal operation indicate the ESP32, Wi-Fi or MQTT broker is being overloaded.
+For Hubble AM2, confirm that you are connected to the **RS232 port**, not the RS485 port. For other batteries, confirm that the port you are using exposes the Pace RS232/UART ASCII protocol.
+
+### Disconnect alert only appears after reconnecting
+
+Set:
+
+```yaml
+notify_retry_count: 1
+```
+
+Also make sure you are using the fixed `bms_monitor.py`, which treats empty serial reads as communication failures.
+
+### Service stop does not send Telegram
+
+Make sure you are using the fixed `bms_monitor.py` with signal handling enabled. The service must be stopped cleanly. A forced kill may not allow any program enough time to send a final Telegram message.
+
+### Telegram notifications not working
+
+Check the following:
+
+- `notify_enabled: true`
+- The specific notification toggle is enabled, for example `notify_disconnect: true`
+- `telegram_bot_token` is correct
+- `telegram_chat_id` is correct
+- You sent `/start` to the bot in Telegram
+- The Home Assistant host or Docker container has internet access
+
+### Checksum errors
+
+Usually indicates noisy serial communication, wrong baud rate, or the wrong port. Use:
+
+```yaml
+bms_baudrate: 9600
+debug_output: 3
+```
+
+### RS485 port not responding
+
+Some batteries expose Modbus RTU on RS485 and Pace ASCII protocol on RS232/UART. This monitor is for the Pace RS232/UART ASCII protocol path. If your RS485 port is Modbus-only, use the RS232/UART Pace protocol port instead.
 
 ---
 
-## Safety Notes
+## Notes on Home Assistant Automations
 
-This project is for monitoring only.
+Home Assistant automations are optional in this version.
 
-It should not write to the BMS or change battery settings.
+The monitor already sends Telegram directly. You may still use MQTT topics such as `pacebms/bms_status` and `pacebms/bms_error` to create extra HA automations, dashboards, persistent notifications, or mobile app push notifications.
 
-Always follow battery manufacturer wiring guidelines, RS485 pinout documentation, and electrical safety practices.
+---
+
+## Contributing
+
+Pull requests are welcome. Please test against a live BMS where possible and include relevant log output.
 
 ---
 
 ## License
 
-Suggested open-source license:
-
-```text
-MIT License
-```
+MIT
 
 ---
 
-## Disclaimer
+## Acknowledgements
 
-This project is provided for monitoring and educational purposes. Use it at your own risk. Battery systems can be hazardous. Incorrect wiring or configuration may damage equipment or create unsafe conditions.
+Originally based on the `bmspace` project by Tertiush.
